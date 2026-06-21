@@ -1,0 +1,19 @@
+/* Styles for Yjs collaborative cursors in CodeMirror 6 inside Obsidian */
+/* Hidden remote cursors as requested: only broadcast local cursor, do not show remote ones */
+
+.cm-ySelection {
+  display: none !important;
+}
+
+.cm-yLineSelection {
+  display: none !important;
+}
+
+.cm-ySelectionCaret {
+  display: none !important;
+}
+
+.cm-ySelectionInfo {
+  display: none !important;
+}
+
