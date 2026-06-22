@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, TFile, PluginSettingTab, App, Setting, Notice } from 'obsidian';
+import { Plugin, MarkdownView, TFile, PluginSettingTab, App, Setting, Notice, ItemView, WorkspaceLeaf } from 'obsidian';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { yCollab } from 'y-codemirror.next';
@@ -12,6 +12,8 @@ interface CoSyncSettings {
   connectionCode: string;
   syncHashes: Record<string, string>;
   fileMappings: Record<string, string>;
+  displayName: string;
+  showManualSettings: boolean;
 }
 
 const DEFAULT_SETTINGS: CoSyncSettings = {
@@ -20,15 +22,19 @@ const DEFAULT_SETTINGS: CoSyncSettings = {
   workspaceId: 'ws-default',
   connectionCode: '',
   syncHashes: {},
-  fileMappings: {}
+  fileMappings: {},
+  displayName: 'Obsidian User',
+  showManualSettings: false
 };
+
+const SYNCABLE_EXTENSIONS = new Set(['md', 'canvas', 'excalidraw', 'json', 'txt']);
 
 class CoSyncPlugin extends Plugin {
   settings!: CoSyncSettings;
   
   // Collaborative state variables
   private ydoc: Y.Doc | null = null;
-  private wsProvider: WebsocketProvider | null = null;
+  public wsProvider: WebsocketProvider | null = null;
   private activeFile: TFile | null = null;
   private activeDocumentId: string | null = null;
   
@@ -43,8 +49,10 @@ class CoSyncPlugin extends Plugin {
   private syncTimer: NodeJS.Timeout | null = null;
   private syncTimeout: NodeJS.Timeout | null = null;
   private statusBarEl: HTMLElement | null = null;
+  private currentStatus: 'connected' | 'connecting' | 'disconnected' | 'syncing' = 'disconnected';
 
   private updateStatusBar(status: 'connected' | 'connecting' | 'disconnected' | 'syncing', customText?: string) {
+    this.currentStatus = status;
     if (!this.statusBarEl) return;
     
     this.statusBarEl.empty();
@@ -55,6 +63,9 @@ class CoSyncPlugin extends Plugin {
     container.style.gap = '6px';
     container.style.cursor = 'pointer';
     container.title = 'Obsidian CoSync Status';
+    container.addEventListener('click', () => {
+      this.activateView();
+    });
     
     const dot = container.createEl('span');
     dot.style.width = '8px';
@@ -79,6 +90,13 @@ class CoSyncPlugin extends Plugin {
       dot.style.backgroundColor = '#3b82f6'; // Blue
       text.textContent = customText || 'CoSync: Syncing ⬆️';
     }
+
+    const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
+    leaves.forEach(leaf => {
+      if (leaf.view instanceof CoSyncView) {
+        leaf.view.render();
+      }
+    });
   }
 
   async onload() {
@@ -87,6 +105,17 @@ class CoSyncPlugin extends Plugin {
 
     // Register setting tab
     this.addSettingTab(new CoSyncSettingTab(this.app, this));
+
+    // Register sidebar view
+    this.registerView(
+      COSYNC_VIEW_TYPE,
+      (leaf) => new CoSyncView(leaf, this)
+    );
+
+    // Add ribbon icon
+    this.addRibbonIcon('users', 'CoSync Collaboration', () => {
+      this.activateView();
+    });
 
     // Add status bar item
     this.statusBarEl = this.addStatusBarItem();
@@ -169,7 +198,8 @@ class CoSyncPlugin extends Plugin {
       try {
         const currentContent = await this.app.vault.read(this.activeFile);
         const normalizeText = (str: string) => str.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-        const yContentWithId = injectCosyncId(yContent, this.activeDocumentId!);
+        const isMarkdown = this.activeFile.extension.toLowerCase() === 'md';
+        const yContentWithId = isMarkdown ? injectCosyncId(yContent, this.activeDocumentId!) : yContent;
         if (normalizeText(yContentWithId) !== normalizeText(currentContent)) {
           this.isApplyingRemoteUpdate = true;
           this.programmedModifications.add(this.activeFile.path);
@@ -294,20 +324,24 @@ class CoSyncPlugin extends Plugin {
         console.log(`CoSync: Found matching document on server by title: ${title} (${docId})`);
         this.settings.fileMappings[file.path] = docId;
         
-        // Inject / Update frontmatter to have correct server ID
-        const fileContent = await this.app.vault.read(file);
-        const contentWithId = injectCosyncId(fileContent, docId);
-        
-        this.isApplyingRemoteUpdate = true;
-        this.programmedModifications.add(file.path);
-        try {
-          await this.app.vault.modify(file, contentWithId);
-        } catch (err) {
-          this.programmedModifications.delete(file.path);
-        } finally {
-          this.isApplyingRemoteUpdate = false;
+        const isMarkdown = file.extension.toLowerCase() === 'md';
+        if (isMarkdown) {
+          // Inject / Update frontmatter to have correct server ID
+          const fileContent = await this.app.vault.read(file);
+          const contentWithId = injectCosyncId(fileContent, docId);
+          
+          this.isApplyingRemoteUpdate = true;
+          this.programmedModifications.add(file.path);
+          try {
+            await this.app.vault.modify(file, contentWithId);
+          } catch (err) {
+            this.programmedModifications.delete(file.path);
+          } finally {
+            this.isApplyingRemoteUpdate = false;
+          }
         }
 
+        this.settings.fileMappings[file.path] = docId;
         await this.saveSettings();
         return docId;
       }
@@ -332,16 +366,19 @@ class CoSyncPlugin extends Plugin {
       console.log(`CoSync: Created new document on server: ${title} (${docId})`);
       
       const fileContent = await this.app.vault.read(file);
-      const contentWithId = injectCosyncId(fileContent, docId);
-      
-      this.isApplyingRemoteUpdate = true;
-      this.programmedModifications.add(file.path);
-      try {
-        await this.app.vault.modify(file, contentWithId);
-      } catch (err) {
-        this.programmedModifications.delete(file.path);
-      } finally {
-        this.isApplyingRemoteUpdate = false;
+      const isMarkdown = file.extension.toLowerCase() === 'md';
+      if (isMarkdown) {
+        const contentWithId = injectCosyncId(fileContent, docId);
+        
+        this.isApplyingRemoteUpdate = true;
+        this.programmedModifications.add(file.path);
+        try {
+          await this.app.vault.modify(file, contentWithId);
+        } catch (err) {
+          this.programmedModifications.delete(file.path);
+        } finally {
+          this.isApplyingRemoteUpdate = false;
+        }
       }
 
       this.settings.fileMappings[file.path] = docId;
@@ -378,14 +415,13 @@ class CoSyncPlugin extends Plugin {
    * Binds the current active note to the server.
    */
   private async handleFileSwitch(force = false) {
-    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!activeView) {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || !SYNCABLE_EXTENSIONS.has(file.extension.toLowerCase())) {
       this.disconnectActive();
       return;
     }
 
-    const file = activeView.file;
-    if (!file || (!force && this.activeFile && this.activeFile.path === file.path)) {
+    if (!force && this.activeFile && this.activeFile.path === file.path) {
       return; // No change
     }
 
@@ -431,9 +467,18 @@ class CoSyncPlugin extends Plugin {
 
     // Set local awareness identifier
     this.wsProvider.awareness.setLocalStateField('user', {
-      name: '3lmagary',
-      color: '#10b981', // Emerald Cursor
+      name: this.settings.displayName || 'Obsidian User',
+      color: '#8b5cf6', // Premium Indigo Cursor
       userId: 'obsidian-client'
+    });
+
+    this.wsProvider.awareness.on('change', () => {
+      const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
+      leaves.forEach(leaf => {
+        if (leaf.view instanceof CoSyncView) {
+          leaf.view.render();
+        }
+      });
     });
 
     const ytext = this.ydoc.getText('codemirror');
@@ -464,20 +509,22 @@ class CoSyncPlugin extends Plugin {
     // Reconcile offline modifications once synced with server using a stable 3-way merge engine
     this.wsProvider.on('sync', async (isSynced: boolean) => {
       if (isSynced && this.activeFile === file && this.ydoc) {
+        const isMarkdown = file.extension.toLowerCase() === 'md';
+
         // SAFEGUARD: If editor has focus, yCollab keeps it in sync. Disk file might be stale.
         // Skipping disk reconciliation prevents overwriting latest typed memory state with stale autosave.
         const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (activeView && activeView.file?.path === file.path && activeView.editor?.hasFocus()) {
           console.log('CoSync: Connection synced. Skipping disk reconciliation since editor is focused.');
           const currentYText = ytext.toString();
-          const currentYTextWithId = injectCosyncId(currentYText, documentId);
+          const currentYTextWithId = isMarkdown ? injectCosyncId(currentYText, documentId) : currentYText;
           this.settings.syncHashes[documentId] = getContentHash(currentYTextWithId);
           await this.saveSettings();
           return;
         }
 
         const serverContent = ytext.toString();
-        const serverContentWithId = injectCosyncId(serverContent, documentId);
+        const serverContentWithId = isMarkdown ? injectCosyncId(serverContent, documentId) : serverContent;
         const serverHash = getContentHash(serverContentWithId);
         const localContent = await this.app.vault.read(file);
         const localHash = getContentHash(localContent);
@@ -547,7 +594,7 @@ class CoSyncPlugin extends Plugin {
             }, 'local-reconciliation-merge');
             
             const mergedContent = ytext.toString();
-            const mergedContentWithId = injectCosyncId(mergedContent, documentId);
+            const mergedContentWithId = isMarkdown ? injectCosyncId(mergedContent, documentId) : mergedContent;
             const mergedHash = getContentHash(mergedContentWithId);
             
             this.isApplyingRemoteUpdate = true;
@@ -563,6 +610,7 @@ class CoSyncPlugin extends Plugin {
             
             this.settings.syncHashes[documentId] = mergedHash;
             await this.saveSettings();
+            console.log(`CoSync: Merged conflicting changes and updated both endpoints.`);
           }
         }
       }
@@ -596,19 +644,32 @@ class CoSyncPlugin extends Plugin {
       }
     });
 
-    // Reconfigure CodeMirror 6 with the Yjs yCollab extension and selection listener
-    const extension: Extension = [
-      yCollab(ytext, this.wsProvider.awareness),
-      cursorListener
-    ];
-    
-    // Inject the extension into active editor view using compartments
-    const editor = activeView.editor as any;
-    if (editor && editor.cm) {
-      const cmView = editor.cm as EditorView;
-      cmView.dispatch({
-        effects: this.yjsCompartment.reconfigure(extension)
-      });
+    // Inject the extension into active editor view using compartments ONLY for MarkdownView
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (activeView && activeView.file?.path === file.path) {
+      const extension: Extension = [
+        yCollab(ytext, this.wsProvider.awareness),
+        cursorListener
+      ];
+      const editor = activeView.editor as any;
+      if (editor && editor.cm) {
+        const cmView = editor.cm as EditorView;
+        cmView.dispatch({
+          effects: this.yjsCompartment.reconfigure(extension)
+        });
+      }
+    } else {
+      // Clear the CodeMirror compartment since we aren't in a markdown view
+      const activeMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+      const editor = activeMarkdownView?.editor as any;
+      if (editor && editor.cm) {
+        const cmView = editor.cm as EditorView;
+        try {
+          cmView.dispatch({
+            effects: this.yjsCompartment.reconfigure([])
+          });
+        } catch (e) {}
+      }
     }
   }
 
@@ -618,18 +679,22 @@ class CoSyncPlugin extends Plugin {
   private async syncYDocToLocalFile() {
     if (!this.activeFile || !this.ydoc) return;
 
+    const isMarkdown = this.activeFile.extension.toLowerCase() === 'md';
+
     // SAFEGUARD: If editor is open in Editing Mode (Source/Live Preview), CodeMirror's yCollab handles sync in-memory.
     // Writing to disk now conflicts with user input and triggers Obsidian's native external modification watcher
     // ("File modified externally, merging automatically..."), which resets selection and ruins the text.
     // We only write to disk if the note is closed/background, or open in Reading Mode (preview).
-    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (activeView && activeView.file?.path === this.activeFile.path && activeView.getMode() === 'source') {
-      console.log('CoSync: Skipping disk write because active editor is open in Editing Mode.');
-      return;
+    if (isMarkdown) {
+      const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (activeView && activeView.file?.path === this.activeFile.path && activeView.getMode() === 'source') {
+        console.log('CoSync: Skipping disk write because active editor is open in Editing Mode.');
+        return;
+      }
     }
     
     const yContent = this.ydoc.getText('codemirror').toString();
-    const yContentWithId = injectCosyncId(yContent, this.activeDocumentId!);
+    const yContentWithId = isMarkdown ? injectCosyncId(yContent, this.activeDocumentId!) : yContent;
 
     try {
       const currentContent = await this.app.vault.read(this.activeFile);
@@ -671,9 +736,12 @@ class CoSyncPlugin extends Plugin {
       return;
     }
 
-    // If WebSocket is connected, yCollab handles all sync.
-    // External modification check is only needed for offline reconciliation or when disconnected.
-    if (this.wsProvider && this.wsProvider.wsconnected) {
+    const isMarkdown = file.extension.toLowerCase() === 'md';
+
+    // If WebSocket is connected, yCollab handles all sync (only for Markdown).
+    // External modification check is only needed for offline reconciliation or when disconnected,
+    // or for non-markdown files where yCollab is not active.
+    if (isMarkdown && this.wsProvider && this.wsProvider.wsconnected) {
       return;
     }
 
@@ -684,9 +752,11 @@ class CoSyncPlugin extends Plugin {
 
     // Safeguard: If the editor currently has focus, it means the user is editing
     // and yCollab is active. Any file writes are just autosaves, so skip syncing.
-    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (activeView && activeView.file?.path === file.path && activeView.editor?.hasFocus()) {
-      return;
+    if (isMarkdown) {
+      const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (activeView && activeView.file?.path === file.path && activeView.editor?.hasFocus()) {
+        return;
+      }
     }
 
     try {
@@ -770,7 +840,7 @@ class CoSyncPlugin extends Plugin {
 
   async syncEntireVault() {
     try {
-      const files = this.app.vault.getMarkdownFiles();
+      const files = this.app.vault.getFiles().filter(file => SYNCABLE_EXTENSIONS.has(file.extension.toLowerCase()));
       new Notice(`CoSync: Starting synchronization of ${files.length} notes...`);
       this.updateStatusBar('syncing', `CoSync: Syncing (0/${files.length}) ⬆️`);
 
@@ -804,13 +874,14 @@ class CoSyncPlugin extends Plugin {
         await Promise.all(batch.map(async (file) => {
           try {
             const fileContent = await this.app.vault.read(file);
-            const title = file.path.endsWith('.md') ? file.path.slice(0, -3) : file.path;
+            const isMarkdown = file.extension.toLowerCase() === 'md';
+            const title = isMarkdown ? (file.path.endsWith('.md') ? file.path.slice(0, -3) : file.path) : file.path;
             
             // Check if mapping already exists
             let docId: string | undefined = this.settings.fileMappings?.[file.path];
             
             // Or if it is in frontmatter
-            if (!docId) {
+            if (!docId && isMarkdown) {
               const cache = this.app.metadataCache.getFileCache(file);
               docId = cache?.frontmatter?.['cosyncId'];
             }
@@ -822,15 +893,15 @@ class CoSyncPlugin extends Plugin {
             if (existsOnServer && docId) {
               // Document already exists on server, just map it locally
               this.settings.fileMappings[file.path] = docId;
-              const contentWithId = injectCosyncId(fileContent, docId);
+              const contentWithId = isMarkdown ? injectCosyncId(fileContent, docId) : fileContent;
               this.settings.syncHashes[docId] = getContentHash(contentWithId);
             } else if (serverDocIdByTitle) {
               // The local ID wasn't on the server (or was missing), but there's a document with matching title on server
               this.settings.fileMappings[file.path] = serverDocIdByTitle;
-              const contentWithId = injectCosyncId(fileContent, serverDocIdByTitle);
+              const contentWithId = isMarkdown ? injectCosyncId(fileContent, serverDocIdByTitle) : fileContent;
               this.settings.syncHashes[serverDocIdByTitle] = getContentHash(contentWithId);
               // Update frontmatter to have the correct serverDocIdByTitle
-              if (docId !== serverDocIdByTitle) {
+              if (docId !== serverDocIdByTitle && isMarkdown) {
                 this.isApplyingRemoteUpdate = true;
                 this.programmedModifications.add(file.path);
                 try {
@@ -861,17 +932,19 @@ class CoSyncPlugin extends Plugin {
               const newDocId = newDoc.id as string;
               
               // Inject the cosyncId frontmatter block to the local file
-              const contentWithId = injectCosyncId(fileContent, newDocId);
+              const contentWithId = isMarkdown ? injectCosyncId(fileContent, newDocId) : fileContent;
               
-              this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
-              try {
-                await this.app.vault.modify(file, contentWithId);
-              } catch (err) {
-                this.programmedModifications.delete(file.path);
-                throw err;
-              } finally {
-                this.isApplyingRemoteUpdate = false;
+              if (isMarkdown) {
+                this.isApplyingRemoteUpdate = true;
+                this.programmedModifications.add(file.path);
+                try {
+                  await this.app.vault.modify(file, contentWithId);
+                } catch (err) {
+                  this.programmedModifications.delete(file.path);
+                  throw err;
+                } finally {
+                  this.isApplyingRemoteUpdate = false;
+                }
               }
 
               this.settings.fileMappings[file.path] = newDocId;
@@ -926,18 +999,22 @@ class CoSyncPlugin extends Plugin {
       }
 
       const serverDocs: any[] = await response.json();
-      const localFiles = this.app.vault.getMarkdownFiles();
+      const localFiles = this.app.vault.getFiles().filter(file => SYNCABLE_EXTENSIONS.has(file.extension.toLowerCase()));
 
       // Read all local files to build a map of existing cosyncIds and paths
       const localCosyncIds = new Set<string>();
       const localPaths = new Set<string>();
 
       for (const file of localFiles) {
-        const localPath = file.path.endsWith('.md') ? file.path.slice(0, -3) : file.path;
+        const isMarkdown = file.extension.toLowerCase() === 'md';
+        const localPath = isMarkdown ? (file.path.endsWith('.md') ? file.path.slice(0, -3) : file.path) : file.path;
         localPaths.add(localPath.toLowerCase());
 
-        const cache = this.app.metadataCache.getFileCache(file);
-        const cosyncId = cache?.frontmatter?.['cosyncId'] || this.settings.fileMappings?.[file.path];
+        let cosyncId = this.settings.fileMappings?.[file.path];
+        if (!cosyncId && isMarkdown) {
+          const cache = this.app.metadataCache.getFileCache(file);
+          cosyncId = cache?.frontmatter?.['cosyncId'];
+        }
         if (cosyncId) {
           localCosyncIds.add(cosyncId);
         }
@@ -998,9 +1075,21 @@ class CoSyncPlugin extends Plugin {
           });
         });
 
-        // 3. Create the markdown file locally
-        const fullFilePath = `${docTitle}.md`;
-        const initialText = injectCosyncId(fileContent, docId);
+        // 3. Create the file locally
+        const lowerTitle = docTitle.toLowerCase();
+        let fullFilePath = docTitle;
+        let isMarkdown = false;
+        
+        if (lowerTitle.endsWith('.canvas') || lowerTitle.endsWith('.excalidraw') || lowerTitle.endsWith('.json') || lowerTitle.endsWith('.txt')) {
+          isMarkdown = false;
+        } else if (lowerTitle.endsWith('.md')) {
+          isMarkdown = true;
+        } else {
+          fullFilePath = `${docTitle}.md`;
+          isMarkdown = true;
+        }
+
+        const initialText = isMarkdown ? injectCosyncId(fileContent, docId) : fileContent;
         
         this.isApplyingRemoteUpdate = true;
         this.programmedModifications.add(fullFilePath);
@@ -1015,7 +1104,7 @@ class CoSyncPlugin extends Plugin {
           await this.saveSettings();
 
           console.log(`CoSync: Successfully created local file "${fullFilePath}"`);
-          new Notice(`CoSync: Created new local note: "${docTitle}"`);
+          new Notice(`CoSync: Created new local file: "${docTitle}"`);
         } catch (err) {
           this.programmedModifications.delete(fullFilePath);
           console.error(`CoSync: Failed to create file "${fullFilePath}":`, err);
@@ -1025,6 +1114,79 @@ class CoSyncPlugin extends Plugin {
       }
     } catch (err) {
       console.warn('CoSync: Error syncing new documents from server:', err);
+    }
+  }
+
+  public getConnectionStatus() {
+    return this.currentStatus;
+  }
+
+  public getActiveFile() {
+    return this.activeFile;
+  }
+
+  public getActiveDocumentId() {
+    return this.activeDocumentId;
+  }
+
+  public getCollaborators() {
+    if (!this.wsProvider || !this.wsProvider.awareness) return [];
+    const states = this.wsProvider.awareness.getStates();
+    const list: { name: string; color: string; isSelf: boolean }[] = [];
+    const localClientId = this.wsProvider.awareness.clientID;
+    
+    for (const [clientId, state] of states.entries()) {
+      const user = state.user;
+      if (user && typeof user === 'object') {
+        list.push({
+          name: (user as any).name || (user as any).username || 'Anonymous',
+          color: (user as any).color || '#E91E63',
+          isSelf: clientId === localClientId
+        });
+      }
+    }
+    return list;
+  }
+
+  public async manualCaptureVersion() {
+    if (!this.activeDocumentId) return null;
+    try {
+      const response = await fetch(`${this.settings.serverUrl}/api/documents/${this.activeDocumentId}/versions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.settings.token}`
+        }
+      });
+      if (response.ok) {
+        return await response.json();
+      } else {
+        const errorData = await response.json();
+        throw new Error(errorData.error || response.statusText);
+      }
+    } catch (err) {
+      console.error('CoSync: Failed manual capture version', err);
+      throw err;
+    }
+  }
+
+  async activateView() {
+    const { workspace } = this.app;
+    
+    let leaf = workspace.getLeavesOfType(COSYNC_VIEW_TYPE)[0];
+    if (!leaf) {
+      const rightLeaf = workspace.getRightLeaf(false);
+      if (rightLeaf) {
+        leaf = rightLeaf;
+        await leaf.setViewState({
+          type: COSYNC_VIEW_TYPE,
+          active: true
+        });
+      }
+    }
+    
+    if (leaf) {
+      workspace.revealLeaf(leaf);
     }
   }
 }
@@ -1042,14 +1204,34 @@ class CoSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl('h2', { text: 'CoSync Collaborative Settings' });
+    containerEl.createEl('h2', { text: 'CoSync Settings' });
 
-    // 1. Paste Connection Code
+    // 1. Display Name
     new Setting(containerEl)
-      .setName('Obsidian Connection Code')
-      .setDesc('Paste the Connection Code from the CoSync web app here to configure the server, token, and workspace in one click.')
+      .setName('Display Name')
+      .setDesc('Nickname that other collaborators will see for your edits from this vault.')
+      .addText(text => text
+        .setPlaceholder('Obsidian User')
+        .setValue(this.plugin.settings.displayName || '')
+        .onChange(async (value) => {
+          this.plugin.settings.displayName = value.trim() || 'Obsidian User';
+          await this.plugin.saveSettings();
+          // Update awareness state on the fly
+          if (this.plugin.wsProvider) {
+            this.plugin.wsProvider.awareness.setLocalStateField('user', {
+              name: this.plugin.settings.displayName,
+              color: '#8b5cf6',
+              userId: 'obsidian-client'
+            });
+          }
+        }));
+
+    // 2. Paste Connection Code
+    new Setting(containerEl)
+      .setName('Connection Code')
+      .setDesc('Paste the Connection Code from the CoSync web app to auto-configure in one click.')
       .addTextArea(text => text
-        .setPlaceholder('Paste your connection code here...')
+        .setPlaceholder('Paste connection code here...')
         .setValue(this.plugin.settings.connectionCode)
         .onChange(async (value) => {
           this.plugin.settings.connectionCode = value.trim();
@@ -1062,7 +1244,7 @@ class CoSyncSettingTab extends PluginSettingTab {
               
               new Notice('CoSync: Connection Code parsed successfully!');
               await this.plugin.saveSettings();
-              this.display(); // Re-render to show updated fields
+              this.display(); // Re-render
               await this.plugin.reconnect();
             } catch (err) {
               new Notice('CoSync: Invalid connection code.');
@@ -1073,49 +1255,63 @@ class CoSyncSettingTab extends PluginSettingTab {
           }
         }));
 
-    containerEl.createEl('h3', { text: 'Manual Connection Configurations' });
-
+    // 3. Show Manual Settings Toggle
     new Setting(containerEl)
-      .setName('CoSync Server Address')
-      .setDesc('Enter the URL of the collaborative server (e.g., http://localhost:4000)')
-      .addText(text => text
-        .setPlaceholder('http://localhost:4000')
-        .setValue(this.plugin.settings.serverUrl)
+      .setName('Show Manual Settings')
+      .setDesc('Toggle to manually edit individual connection parameters.')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.showManualSettings)
         .onChange(async (value) => {
-          this.plugin.settings.serverUrl = value;
+          this.plugin.settings.showManualSettings = value;
           await this.plugin.saveSettings();
-          await this.plugin.reconnect();
+          this.display();
         }));
 
-    new Setting(containerEl)
-      .setName('Authentication JWT Token')
-      .setDesc('Enter the JWT token provided by the web interface')
-      .addText(text => text
-        .setPlaceholder('Paste your JWT token here')
-        .setValue(this.plugin.settings.token)
-        .onChange(async (value) => {
-          this.plugin.settings.token = value;
-          await this.plugin.saveSettings();
-          await this.plugin.reconnect();
-        }));
+    if (this.plugin.settings.showManualSettings) {
+      containerEl.createEl('h3', { text: 'Manual Connection Configurations' });
 
-    new Setting(containerEl)
-      .setName('Workspace ID')
-      .setDesc('Specify the workspace identifier to synchronize within')
-      .addText(text => text
-        .setPlaceholder('ws-default')
-        .setValue(this.plugin.settings.workspaceId)
-        .onChange(async (value) => {
-          this.plugin.settings.workspaceId = value;
-          await this.plugin.saveSettings();
-          await this.plugin.reconnect();
-        }));
+      new Setting(containerEl)
+        .setName('CoSync Server Address')
+        .setDesc('URL of the collaborative server')
+        .addText(text => text
+          .setPlaceholder('http://localhost:4000')
+          .setValue(this.plugin.settings.serverUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.serverUrl = value;
+            await this.plugin.saveSettings();
+            await this.plugin.reconnect();
+          }));
+
+      new Setting(containerEl)
+        .setName('Authentication JWT Token')
+        .setDesc('JWT token for authentication')
+        .addText(text => text
+          .setPlaceholder('Paste JWT token here')
+          .setValue(this.plugin.settings.token)
+          .onChange(async (value) => {
+            this.plugin.settings.token = value;
+            await this.plugin.saveSettings();
+            await this.plugin.reconnect();
+          }));
+
+      new Setting(containerEl)
+        .setName('Workspace ID')
+        .setDesc('Workspace identifier')
+        .addText(text => text
+          .setPlaceholder('ws-default')
+          .setValue(this.plugin.settings.workspaceId)
+          .onChange(async (value) => {
+            this.plugin.settings.workspaceId = value;
+            await this.plugin.saveSettings();
+            await this.plugin.reconnect();
+          }));
+    }
 
     containerEl.createEl('h3', { text: 'Vault Synchronization' });
 
     new Setting(containerEl)
       .setName('Sync Local Vault to Web')
-      .setDesc('Upload and sync all markdown files in your vault to the connected workspace on the server.')
+      .setDesc('Upload and sync all markdown files in your vault to the connected workspace.')
       .addButton(btn => btn
         .setButtonText('Sync Entire Vault Now')
         .setCta()
@@ -1135,16 +1331,14 @@ class CoSyncSettingTab extends PluginSettingTab {
 function injectCosyncId(content: string, docId: string): string {
   const cleanContent = content.replace(/^\uFEFF/, '');
   
-  // Match frontmatter blocks containing "cosyncId:"
-  const frontmatterRegex = /^---\r?\n([\s\S]*?cosyncId:[\s\S]*?)\r?\n---(?:\r?\n|$)/;
+  // Regex to match any frontmatter block at the very start of the file
+  const frontmatterRegex = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
+  const match = cleanContent.match(frontmatterRegex);
   
   let body = cleanContent;
   let otherFrontmatterLines: string[] = [];
-  let hasFrontmatter = false;
   
-  const match = cleanContent.match(frontmatterRegex);
   if (match) {
-    hasFrontmatter = true;
     const innerContent = match[1];
     const lines = innerContent.split(/\r?\n/);
     for (const line of lines) {
@@ -1154,20 +1348,18 @@ function injectCosyncId(content: string, docId: string): string {
       }
     }
     body = cleanContent.replace(frontmatterRegex, '');
+  } else {
+    // If no frontmatter block matches, check if there's any loose cosyncId in the file content
+    body = cleanContent.replace(/cosyncId:\s*[^\r\n]+/g, '');
   }
   
-  // Also strip any remaining loose cosyncId lines
-  body = body.replace(/cosyncId:\s*[^\r\n]+/g, '');
-  body = body.trim();
+  // Strip any remaining loose cosyncId lines from the body
+  body = body.replace(/cosyncId:\s*[^\r\n]+/g, '').trim();
   
-  // If we had other frontmatter lines, reconstruct the frontmatter block
-  if (otherFrontmatterLines.length > 0) {
-    const uniqueLines = Array.from(new Set(otherFrontmatterLines));
-    return `---\n${uniqueLines.join('\n')}\n---\n\n${body}`;
-  }
+  const uniqueLines = Array.from(new Set(otherFrontmatterLines));
+  uniqueLines.push(`cosyncId: ${docId}`);
   
-  // If there was no other frontmatter but we did match frontmatter, return just body (stripped)
-  return body;
+  return `---\n${uniqueLines.join('\n')}\n---\n\n${body}`;
 }
 
 function getContentHash(str: string): string {
@@ -1218,6 +1410,128 @@ function updateYTextCleanly(ytext: Y.Text, newText: string) {
   if (deleteCount > 0 || insertText.length > 0) {
     ytext.delete(commonPrefixLen, deleteCount);
     ytext.insert(commonPrefixLen, insertText);
+  }
+}
+
+const COSYNC_VIEW_TYPE = 'cosync-collaboration-view';
+
+class CoSyncView extends ItemView {
+  private plugin: CoSyncPlugin;
+
+  constructor(leaf: WorkspaceLeaf, plugin: CoSyncPlugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+
+  getViewType(): string {
+    return COSYNC_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return 'CoSync Collaboration';
+  }
+
+  getIcon(): string {
+    return 'users';
+  }
+
+  async onOpen() {
+    this.render();
+    this.registerEvent(
+      this.app.workspace.on('active-leaf-change', () => this.render())
+    );
+  }
+
+  async onClose() {
+    // Cleanup
+  }
+
+  public render() {
+    const container = this.contentEl;
+    container.empty();
+    container.addClass('cosync-sidebar-view');
+
+    // Header title
+    const header = container.createEl('div', { cls: 'cosync-sidebar-header' });
+    header.createEl('h3', { text: 'CoSync Collab' });
+
+    // Status pill
+    const status = this.plugin.getConnectionStatus();
+    const statusCard = container.createEl('div', { cls: 'cosync-status-card' });
+    const statusDot = statusCard.createEl('span', { cls: `cosync-status-dot status-${status}` });
+    const statusText = statusCard.createEl('span', { cls: 'cosync-status-text' });
+
+    if (status === 'connected') {
+      statusText.textContent = 'Connected';
+    } else if (status === 'connecting') {
+      statusText.textContent = 'Connecting...';
+    } else if (status === 'disconnected') {
+      statusText.textContent = 'Offline';
+    } else if (status === 'syncing') {
+      statusText.textContent = 'Syncing...';
+    }
+
+    // Active Note Info
+    const activeFile = this.plugin.getActiveFile();
+    const docSection = container.createEl('div', { cls: 'cosync-section' });
+    docSection.createEl('h4', { text: 'Active Note' });
+    const docInfo = docSection.createEl('div', { cls: 'cosync-doc-info' });
+
+    if (activeFile) {
+      const docTitle = docInfo.createEl('div', { cls: 'cosync-doc-title' });
+      docTitle.createEl('span', { text: '📄 ', cls: 'cosync-doc-icon' });
+      docTitle.createEl('span', { text: activeFile.basename, cls: 'cosync-doc-name' });
+    } else {
+      docInfo.createEl('div', { cls: 'cosync-doc-title empty', text: 'No note open' });
+    }
+
+    // Collaborators list
+    const collaboratorsSection = container.createEl('div', { cls: 'cosync-section' });
+    collaboratorsSection.createEl('h4', { text: 'Active Collaborators' });
+    const listEl = collaboratorsSection.createEl('div', { cls: 'cosync-collaborators-list' });
+
+    const collaborators = this.plugin.getCollaborators();
+    if (collaborators.length > 0) {
+      collaborators.forEach(user => {
+        const userRow = listEl.createEl('div', { cls: 'cosync-user-row' });
+        
+        const avatar = userRow.createEl('div', { cls: 'cosync-user-avatar' });
+        avatar.style.backgroundColor = user.color;
+        avatar.textContent = user.name.charAt(0).toUpperCase();
+
+        const nameSpan = userRow.createEl('span', { cls: 'cosync-user-name' });
+        nameSpan.textContent = user.name;
+
+        if (user.isSelf) {
+          userRow.createEl('span', { cls: 'cosync-self-badge', text: 'you' });
+        }
+      });
+    } else {
+      listEl.createEl('div', { cls: 'cosync-no-collaborators', text: 'No other collaborators' });
+    }
+
+    // Capture version button
+    if (activeFile && status === 'connected') {
+      const actionsSection = container.createEl('div', { cls: 'cosync-actions-section' });
+      const captureBtn = actionsSection.createEl('button', { cls: 'cosync-btn btn-primary', text: 'Capture Version' });
+      captureBtn.addEventListener('click', async () => {
+        try {
+          captureBtn.disabled = true;
+          captureBtn.textContent = 'Capturing...';
+          const version = await this.plugin.manualCaptureVersion();
+          if (version) {
+            new Notice(`Captured Version #${version.versionNumber} successfully!`);
+          } else {
+            new Notice('Failed to capture version.');
+          }
+        } catch (err) {
+          new Notice(`Error: ${(err as any).message || err}`);
+        } finally {
+          captureBtn.disabled = false;
+          captureBtn.textContent = 'Capture Version';
+        }
+      });
+    }
   }
 }
 

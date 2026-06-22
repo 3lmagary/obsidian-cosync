@@ -17,3 +17,225 @@
   display: none !important;
 }
 
+/* CoSync Sidebar Panel Styles */
+
+.cosync-sidebar-view {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  height: 100%;
+  overflow-y: auto;
+  font-family: var(--font-interface);
+  background-color: transparent;
+}
+
+.cosync-sidebar-header {
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 12px;
+  margin-bottom: 4px;
+}
+
+.cosync-sidebar-header h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--text-normal);
+  letter-spacing: -0.2px;
+}
+
+.cosync-status-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background-color: var(--background-secondary-alt);
+  border: 1px solid var(--background-modifier-border);
+}
+
+.cosync-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.cosync-status-dot.status-connected {
+  background-color: #10b981; /* Emerald Green */
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+}
+
+.cosync-status-dot.status-connecting {
+  background-color: #f59e0b; /* Amber */
+  animation: cosync-pulse 1.5s infinite ease-in-out;
+}
+
+.cosync-status-dot.status-disconnected {
+  background-color: #ef4444; /* Red */
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.3);
+}
+
+.cosync-status-dot.status-syncing {
+  background-color: #3b82f6; /* Blue */
+  animation: cosync-pulse 1.2s infinite ease-in-out;
+}
+
+@keyframes cosync-pulse {
+  0% { transform: scale(0.95); opacity: 0.6; }
+  50% { transform: scale(1.15); opacity: 1; box-shadow: 0 0 8px currentColor; }
+  100% { transform: scale(0.95); opacity: 0.6; }
+}
+
+.cosync-status-text {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.cosync-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cosync-section h4 {
+  margin: 0;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.cosync-doc-info {
+  background-color: var(--background-secondary);
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  display: flex;
+  align-items: center;
+}
+
+.cosync-doc-title {
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--text-normal);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cosync-doc-icon {
+  font-size: 1rem;
+}
+
+.cosync-doc-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cosync-doc-title.empty {
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.cosync-collaborators-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cosync-user-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background-color: var(--background-secondary-alt);
+  border: 1px solid var(--background-modifier-border);
+  transition: all 0.15s ease;
+}
+
+.cosync-user-row:hover {
+  background-color: var(--background-secondary);
+  border-color: var(--background-modifier-border-focus);
+}
+
+.cosync-user-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 800;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.2);
+  flex-shrink: 0;
+}
+
+.cosync-user-name {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-normal);
+  flex-grow: 1;
+}
+
+.cosync-self-badge {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-on-accent);
+  background-color: var(--interactive-accent);
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.2px;
+}
+
+.cosync-no-collaborators {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 16px;
+  font-style: italic;
+  background-color: var(--background-secondary-alt);
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.cosync-actions-section {
+  display: flex;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+.cosync-btn {
+  width: 100%;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.cosync-btn.btn-primary {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.cosync-btn.btn-primary:hover {
+  background-color: var(--interactive-accent-hover);
+}
+
+.cosync-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
