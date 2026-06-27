@@ -11496,17 +11496,18 @@ function injectCosyncId(content, docId) {
       }
     }
     body = cleanContent.replace(frontmatterRegex, "");
-  } else {
-    body = cleanContent.replace(/cosyncId:\s*[^\r\n]+/g, "");
-  }
-  body = body.replace(/cosyncId:\s*[^\r\n]+/g, "").trim();
-  const uniqueLines = Array.from(new Set(otherFrontmatterLines));
-  uniqueLines.push(`cosyncId: ${docId}`);
-  return `---
-${uniqueLines.join("\n")}
+    if (otherFrontmatterLines.length > 0) {
+      return `---
+${otherFrontmatterLines.join("\n")}
 ---
 
-${body}`;
+${body.trim()}`;
+    } else {
+      return body.trim();
+    }
+  } else {
+    return cleanContent.replace(/cosyncId:\s*[^\r\n]+/g, "").trim();
+  }
 }
 function getContentHash(str) {
   let hash = 5381;

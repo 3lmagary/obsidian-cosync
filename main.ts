@@ -1473,8 +1473,6 @@ class CoSyncSettingTab extends PluginSettingTab {
 
 function injectCosyncId(content: string, docId: string): string {
   const cleanContent = content.replace(/^\uFEFF/, '');
-  
-  // Regex to match any frontmatter block at the very start of the file
   const frontmatterRegex = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
   const match = cleanContent.match(frontmatterRegex);
   
@@ -1491,18 +1489,15 @@ function injectCosyncId(content: string, docId: string): string {
       }
     }
     body = cleanContent.replace(frontmatterRegex, '');
+    
+    if (otherFrontmatterLines.length > 0) {
+      return `---\n${otherFrontmatterLines.join('\n')}\n---\n\n${body.trim()}`;
+    } else {
+      return body.trim();
+    }
   } else {
-    // If no frontmatter block matches, check if there's any loose cosyncId in the file content
-    body = cleanContent.replace(/cosyncId:\s*[^\r\n]+/g, '');
+    return cleanContent.replace(/cosyncId:\s*[^\r\n]+/g, '').trim();
   }
-  
-  // Strip any remaining loose cosyncId lines from the body
-  body = body.replace(/cosyncId:\s*[^\r\n]+/g, '').trim();
-  
-  const uniqueLines = Array.from(new Set(otherFrontmatterLines));
-  uniqueLines.push(`cosyncId: ${docId}`);
-  
-  return `---\n${uniqueLines.join('\n')}\n---\n\n${body}`;
 }
 
 function getContentHash(str: string): string {
