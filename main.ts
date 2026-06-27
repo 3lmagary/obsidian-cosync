@@ -1375,12 +1375,39 @@ class CoSyncSettingTab extends PluginSettingTab {
 
     containerEl.createEl('h2', { text: 'CoSync Settings' });
 
-    // 1. Display Name
+    // 1. Server Address
     new Setting(containerEl)
-      .setName('Display Name')
-      .setDesc('Nickname that other collaborators will see for your edits from this vault.')
+      .setName('Server URL')
+      .setDesc('The address of your self-hosted CoSync API server.')
       .addText(text => text
-        .setPlaceholder('Obsidian User')
+        .setPlaceholder('https://cosync-api.3lmagary.com')
+        .setValue(this.plugin.settings.serverUrl || '')
+        .onChange(async (value) => {
+          this.plugin.settings.serverUrl = value.trim();
+          await this.plugin.saveSettings();
+          await this.plugin.reconnect();
+        }));
+
+    // 2. Connection Code / Token
+    new Setting(containerEl)
+      .setName('Connection Code')
+      .setDesc('Enter the Connection Code (Pre-shared Key) configured on your server.')
+      .addText(text => text
+        .setPlaceholder('Enter connection code here...')
+        .setValue(this.plugin.settings.token || '')
+        .onChange(async (value) => {
+          this.plugin.settings.token = value.trim();
+          this.plugin.settings.workspaceId = 'default-workspace'; // force single-workspace mode
+          await this.plugin.saveSettings();
+          await this.plugin.reconnect();
+        }));
+
+    // 3. Device Name
+    new Setting(containerEl)
+      .setName('Device Name')
+      .setDesc('Name of this device (e.g. PC, Tablet, Phone) to show who is editing.')
+      .addText(text => text
+        .setPlaceholder('PC')
         .setValue(this.plugin.settings.displayName || '')
         .onChange(async (value) => {
           this.plugin.settings.displayName = value.trim() || 'Obsidian User';
@@ -1394,87 +1421,6 @@ class CoSyncSettingTab extends PluginSettingTab {
             });
           }
         }));
-
-    // 2. Paste Connection Code
-    new Setting(containerEl)
-      .setName('Connection Code')
-      .setDesc('Paste the Connection Code from the CoSync web app to auto-configure in one click.')
-      .addTextArea(text => text
-        .setPlaceholder('Paste connection code here...')
-        .setValue(this.plugin.settings.connectionCode)
-        .onChange(async (value) => {
-          this.plugin.settings.connectionCode = value.trim();
-          if (value.trim()) {
-            try {
-              const config = JSON.parse(atob(value.trim()));
-              this.plugin.settings.serverUrl = config.serverUrl;
-              this.plugin.settings.token = config.token;
-              this.plugin.settings.workspaceId = config.workspaceId;
-              
-              new Notice('CoSync: Connection Code parsed successfully!');
-              await this.plugin.saveSettings();
-              this.display(); // Re-render
-              await this.plugin.reconnect();
-            } catch (err) {
-              new Notice('CoSync: Invalid connection code.');
-            }
-          } else {
-            await this.plugin.saveSettings();
-            await this.plugin.reconnect();
-          }
-        }));
-
-    // 3. Show Manual Settings Toggle
-    new Setting(containerEl)
-      .setName('Show Manual Settings')
-      .setDesc('Toggle to manually edit individual connection parameters.')
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.showManualSettings)
-        .onChange(async (value) => {
-          this.plugin.settings.showManualSettings = value;
-          await this.plugin.saveSettings();
-          this.display();
-        }));
-
-    if (this.plugin.settings.showManualSettings) {
-      containerEl.createEl('h3', { text: 'Manual Connection Configurations' });
-
-      new Setting(containerEl)
-        .setName('CoSync Server Address')
-        .setDesc('URL of the collaborative server')
-        .addText(text => text
-          .setPlaceholder('http://localhost:4000')
-          .setValue(this.plugin.settings.serverUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.serverUrl = value;
-            await this.plugin.saveSettings();
-            await this.plugin.reconnect();
-          }));
-
-      new Setting(containerEl)
-        .setName('Authentication JWT Token')
-        .setDesc('JWT token for authentication')
-        .addText(text => text
-          .setPlaceholder('Paste JWT token here')
-          .setValue(this.plugin.settings.token)
-          .onChange(async (value) => {
-            this.plugin.settings.token = value;
-            await this.plugin.saveSettings();
-            await this.plugin.reconnect();
-          }));
-
-      new Setting(containerEl)
-        .setName('Workspace ID')
-        .setDesc('Workspace identifier')
-        .addText(text => text
-          .setPlaceholder('ws-default')
-          .setValue(this.plugin.settings.workspaceId)
-          .onChange(async (value) => {
-            this.plugin.settings.workspaceId = value;
-            await this.plugin.saveSettings();
-            await this.plugin.reconnect();
-          }));
-    }
 
     containerEl.createEl('h3', { text: 'Background Synchronization' });
 
@@ -1507,8 +1453,8 @@ class CoSyncSettingTab extends PluginSettingTab {
     containerEl.createEl('h3', { text: 'Vault Synchronization' });
 
     new Setting(containerEl)
-      .setName('Sync Local Vault to Web')
-      .setDesc('Upload and sync all markdown files in your vault to the connected workspace.')
+      .setName('Sync Local Vault Now')
+      .setDesc('Force a full synchronization check immediately.')
       .addButton(btn => btn
         .setButtonText('Sync Entire Vault Now')
         .setCta()
