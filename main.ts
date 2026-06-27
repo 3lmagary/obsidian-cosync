@@ -1383,7 +1383,11 @@ class CoSyncSettingTab extends PluginSettingTab {
         .setPlaceholder('https://cosync-api.3lmagary.com')
         .setValue(this.plugin.settings.serverUrl || '')
         .onChange(async (value) => {
-          this.plugin.settings.serverUrl = value.trim();
+          let cleanedUrl = value.trim();
+          while (cleanedUrl.endsWith('/')) {
+            cleanedUrl = cleanedUrl.slice(0, -1);
+          }
+          this.plugin.settings.serverUrl = cleanedUrl;
           await this.plugin.saveSettings();
           await this.plugin.reconnect();
         }));
