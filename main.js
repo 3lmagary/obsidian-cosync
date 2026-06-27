@@ -11167,7 +11167,8 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             {
               method: "PUT",
               headers: {
-                "Authorization": `Bearer ${this.settings.token}`
+                "Authorization": `Bearer ${this.settings.token}`,
+                "Content-Type": "application/octet-stream"
               },
               body: localBuffer
             }
