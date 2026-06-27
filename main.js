@@ -220,7 +220,7 @@ var floor = Math.floor;
 var abs = Math.abs;
 var min = (a, b) => a < b ? a : b;
 var max = (a, b) => a > b ? a : b;
-var isNaN = Number.isNaN;
+var isNaN2 = Number.isNaN;
 var pow = Math.pow;
 var isNegativeZero = (n) => n !== 0 ? n < 0 : 1 / n < 0;
 
@@ -271,8 +271,8 @@ var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 var MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
 var LOWEST_INT32 = 1 << 31;
 var isInteger = Number.isInteger || ((num) => typeof num === "number" && isFinite(num) && floor(num) === num);
-var isNaN2 = Number.isNaN;
-var parseInt = Number.parseInt;
+var isNaN3 = Number.isNaN;
+var parseInt2 = Number.parseInt;
 
 // node_modules/lib0/string.js
 var fromCharCode = String.fromCharCode;
@@ -10339,9 +10339,12 @@ var DEFAULT_SETTINGS = {
   workspaceId: "ws-default",
   connectionCode: "",
   syncHashes: {},
+  syncVersions: {},
   fileMappings: {},
   displayName: "Obsidian User",
-  showManualSettings: false
+  showManualSettings: false,
+  syncInterval: 30,
+  enableBackgroundSync: true
 };
 var SYNCABLE_EXTENSIONS = /* @__PURE__ */ new Set(["md", "canvas", "excalidraw", "json", "txt"]);
 var CoSyncPlugin = class extends import_obsidian.Plugin {
@@ -10362,6 +10365,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.syncTimeout = null;
     this.statusBarEl = null;
     this.currentStatus = "disconnected";
+    this.isSyncing = false;
   }
   updateStatusBar(status, customText) {
     this.currentStatus = status;
@@ -10438,8 +10442,17 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       })
     );
     this.handleFileSwitch();
-    this.syncTimer = setInterval(() => this.syncNewDocumentsFromServer(), 15e3);
-    setTimeout(() => this.syncNewDocumentsFromServer(), 1e3);
+    this.startPeriodicSync();
+    setTimeout(() => this.syncVault(), 2e3);
+  }
+  startPeriodicSync() {
+    if (this.syncTimer) {
+      clearInterval(this.syncTimer);
+      this.syncTimer = null;
+    }
+    if (this.settings.enableBackgroundSync && this.settings.syncInterval > 0) {
+      this.syncTimer = setInterval(() => this.syncVault(), this.settings.syncInterval * 1e3);
+    }
   }
   onunload() {
     console.log("Unloading CoSync Plugin...");
@@ -10987,229 +11000,362 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.handleFileSwitch();
   }
   async syncEntireVault() {
+    new import_obsidian.Notice("CoSync: Triggering vault synchronization...");
+    await this.syncVault();
+  }
+  async syncVault() {
+    if (this.isSyncing) return;
+    if (!this.settings.token || !this.settings.workspaceId) return;
+    this.isSyncing = true;
+    console.log("CoSync: Starting background synchronization...");
+    this.updateStatusBar("syncing");
     try {
-      const files = this.app.vault.getFiles().filter((file) => SYNCABLE_EXTENSIONS.has(file.extension.toLowerCase()));
-      new import_obsidian.Notice(`CoSync: Starting synchronization of ${files.length} notes...`);
-      this.updateStatusBar("syncing", `CoSync: Syncing (0/${files.length}) \u2B06\uFE0F`);
-      const response = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
+      const docsResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
         method: "GET",
         headers: {
           "Authorization": `Bearer ${this.settings.token}`
         }
       });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch documents from server: ${response.statusText}`);
+      if (!docsResponse.ok) {
+        throw new Error(`Failed to fetch documents: ${docsResponse.statusText}`);
       }
-      const serverDocs = await response.json();
-      const serverDocMap = /* @__PURE__ */ new Map();
-      const serverDocIdSet = /* @__PURE__ */ new Set();
-      serverDocs.forEach((d) => {
-        serverDocMap.set(d.title.trim().toLowerCase(), d.id);
-        serverDocIdSet.add(d.id);
+      const serverDocs = await docsResponse.json();
+      const attachResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments`, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${this.settings.token}`
+        }
       });
-      let syncedCount = 0;
-      let failedCount = 0;
-      const BATCH_SIZE = 5;
-      for (let i = 0; i < files.length; i += BATCH_SIZE) {
-        const batch = files.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map(async (file) => {
-          try {
-            const fileContent = await this.app.vault.read(file);
-            const isMarkdown = file.extension.toLowerCase() === "md";
-            const title = isMarkdown ? file.path.endsWith(".md") ? file.path.slice(0, -3) : file.path : file.path;
-            let docId = this.settings.fileMappings?.[file.path];
-            if (!docId && isMarkdown) {
-              const cache = this.app.metadataCache.getFileCache(file);
-              docId = cache?.frontmatter?.["cosyncId"];
-            }
-            const existsOnServer = docId && serverDocIdSet.has(docId);
-            const serverDocIdByTitle = serverDocMap.get(title.trim().toLowerCase());
-            if (existsOnServer && docId) {
-              this.settings.fileMappings[file.path] = docId;
-              const contentWithId = isMarkdown ? injectCosyncId(fileContent, docId) : fileContent;
-              this.settings.syncHashes[docId] = getContentHash(contentWithId);
-            } else if (serverDocIdByTitle) {
-              this.settings.fileMappings[file.path] = serverDocIdByTitle;
-              const contentWithId = isMarkdown ? injectCosyncId(fileContent, serverDocIdByTitle) : fileContent;
-              this.settings.syncHashes[serverDocIdByTitle] = getContentHash(contentWithId);
-              if (docId !== serverDocIdByTitle && isMarkdown) {
-                this.isApplyingRemoteUpdate = true;
-                this.programmedModifications.add(file.path);
-                try {
-                  await this.app.vault.modify(file, contentWithId);
-                } catch (err) {
-                  this.programmedModifications.delete(file.path);
-                  throw err;
-                } finally {
-                  this.isApplyingRemoteUpdate = false;
-                }
-              }
-            } else {
-              const createResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${this.settings.token}`
-                },
-                body: JSON.stringify({ title, initialContent: fileContent })
-              });
-              if (!createResponse.ok) {
-                throw new Error(`Failed to create document: ${createResponse.statusText}`);
-              }
-              const newDoc = await createResponse.json();
-              const newDocId = newDoc.id;
-              const contentWithId = isMarkdown ? injectCosyncId(fileContent, newDocId) : fileContent;
-              if (isMarkdown) {
-                this.isApplyingRemoteUpdate = true;
-                this.programmedModifications.add(file.path);
-                try {
-                  await this.app.vault.modify(file, contentWithId);
-                } catch (err) {
-                  this.programmedModifications.delete(file.path);
-                  throw err;
-                } finally {
-                  this.isApplyingRemoteUpdate = false;
-                }
-              }
-              this.settings.fileMappings[file.path] = newDocId;
-              this.settings.syncHashes[newDocId] = getContentHash(contentWithId);
-            }
-            syncedCount++;
-            this.updateStatusBar("syncing", `CoSync: Syncing (${syncedCount}/${files.length}) \u2B06\uFE0F`);
-          } catch (err) {
-            console.warn(`CoSync: Failed to sync "${file.path}":`, err);
-            failedCount++;
-          }
-        }));
-        await this.saveSettings();
+      if (!attachResponse.ok) {
+        throw new Error(`Failed to fetch attachments: ${attachResponse.statusText}`);
       }
-      new import_obsidian.Notice(`CoSync: Vault Sync complete!
-Success: ${syncedCount}, Failed: ${failedCount}`);
+      const serverAttachments = await attachResponse.json();
+      const serverAttachMap = new Map(serverAttachments.map((a) => [a.filepath.toLowerCase(), a]));
+      const localFiles = this.app.vault.getFiles();
+      const localSyncable = localFiles.filter((f) => SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase()));
+      const localBinary = localFiles.filter((f) => !SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase()));
+      const localSyncableMap = new Map(localSyncable.map((f) => [f.path.toLowerCase(), f]));
+      const localBinaryMap = new Map(localBinary.map((f) => [f.path.toLowerCase(), f]));
+      const serverDocIdMap = /* @__PURE__ */ new Map();
+      const serverDocTitleMap = /* @__PURE__ */ new Map();
+      serverDocs.forEach((d) => {
+        serverDocIdMap.set(d.id, d);
+        serverDocTitleMap.set(d.title.trim().toLowerCase(), d);
+      });
+      for (const file of localSyncable) {
+        const isMarkdown = file.extension.toLowerCase() === "md";
+        const title = isMarkdown ? file.path.endsWith(".md") ? file.path.slice(0, -3) : file.path : file.path;
+        let docId = this.settings.fileMappings[file.path];
+        if (!docId && isMarkdown) {
+          const cache = this.app.metadataCache.getFileCache(file);
+          docId = cache?.frontmatter?.["cosyncId"];
+        }
+        let existsOnServer = docId && serverDocIdMap.has(docId);
+        let matchedServerDoc = existsOnServer ? serverDocIdMap.get(docId) : serverDocTitleMap.get(title.trim().toLowerCase());
+        if (matchedServerDoc) {
+          docId = matchedServerDoc.id;
+          this.settings.fileMappings[file.path] = docId;
+          const localContent = await this.app.vault.read(file);
+          const localHash = getContentHash(localContent);
+          const lastSyncedHash = this.settings.syncHashes[docId];
+          const serverVersion = matchedServerDoc.version;
+          const lastSyncedVersion = this.settings.syncVersions[docId] || 0;
+          const localChanged = localHash !== lastSyncedHash;
+          const serverChanged = serverVersion > lastSyncedVersion;
+          const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+          const isOpenAndFocused = activeView && activeView.file?.path === file.path && activeView.editor?.hasFocus();
+          if (isOpenAndFocused) {
+            this.settings.syncVersions[docId] = serverVersion;
+            this.settings.syncHashes[docId] = localHash;
+            continue;
+          }
+          if (localChanged || serverChanged) {
+            console.log(`CoSync: Syncing background document "${file.path}" (localChanged=${localChanged}, serverChanged=${serverChanged})`);
+            await this.reconcileBackgroundDoc(file, docId, isMarkdown, localContent, localHash, lastSyncedHash, serverVersion);
+          }
+        } else {
+          console.log(`CoSync: Uploading new local document "${file.path}" to server...`);
+          const fileContent = await this.app.vault.read(file);
+          const createResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${this.settings.token}`
+            },
+            body: JSON.stringify({ title, initialContent: fileContent })
+          });
+          if (createResponse.ok) {
+            const newDoc = await createResponse.json();
+            const newDocId = newDoc.id;
+            this.settings.fileMappings[file.path] = newDocId;
+            const contentWithId = isMarkdown ? injectCosyncId(fileContent, newDocId) : fileContent;
+            if (isMarkdown && contentWithId !== fileContent) {
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, contentWithId);
+              } catch (e) {
+                this.programmedModifications.delete(file.path);
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
+            }
+            this.settings.syncHashes[newDocId] = getContentHash(contentWithId);
+            this.settings.syncVersions[newDocId] = 0;
+          }
+        }
+      }
+      for (const doc2 of serverDocs) {
+        const isMapped = Object.values(this.settings.fileMappings).includes(doc2.id);
+        if (!isMapped) {
+          const lowerTitle = doc2.title.toLowerCase();
+          let expectedPath = doc2.title;
+          let isMarkdown = false;
+          if (lowerTitle.endsWith(".canvas") || lowerTitle.endsWith(".excalidraw") || lowerTitle.endsWith(".json") || lowerTitle.endsWith(".txt")) {
+            isMarkdown = false;
+          } else if (lowerTitle.endsWith(".md")) {
+            isMarkdown = true;
+          } else {
+            expectedPath = `${doc2.title}.md`;
+            isMarkdown = true;
+          }
+          const fileExists = localSyncableMap.has(expectedPath.toLowerCase());
+          if (!fileExists) {
+            console.log(`CoSync: Document "${doc2.title}" is missing locally. Downloading...`);
+            await this.downloadNewDocFromServer(doc2.id, expectedPath, isMarkdown);
+          } else {
+            const matchedFile = localSyncableMap.get(expectedPath.toLowerCase());
+            this.settings.fileMappings[matchedFile.path] = doc2.id;
+          }
+        }
+      }
+      for (const file of localBinary) {
+        const localBuffer = await this.app.vault.readBinary(file);
+        const localHash = getBinaryHash(localBuffer);
+        const lastSyncedHash = this.settings.syncHashes[file.path];
+        const serverAttach = serverAttachMap.get(file.path.toLowerCase());
+        if (!serverAttach || serverAttach.hash !== localHash || localHash !== lastSyncedHash) {
+          console.log(`CoSync: Uploading background attachment "${file.path}" (size=${localBuffer.byteLength} bytes)...`);
+          const uploadRes = await fetch(
+            `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(file.path)}&hash=${localHash}`,
+            {
+              method: "PUT",
+              headers: {
+                "Authorization": `Bearer ${this.settings.token}`
+              },
+              body: localBuffer
+            }
+          );
+          if (uploadRes.ok) {
+            this.settings.syncHashes[file.path] = localHash;
+          }
+        }
+      }
+      for (const attach of serverAttachments) {
+        const localFile = localBinaryMap.get(attach.filepath.toLowerCase());
+        const lastSyncedHash = this.settings.syncHashes[attach.filepath];
+        if (!localFile || attach.hash !== lastSyncedHash) {
+          console.log(`CoSync: Downloading background attachment "${attach.filepath}" (size=${attach.size} bytes)...`);
+          const pathParts = attach.filepath.split("/");
+          if (pathParts.length > 1) {
+            let currentFolderPath = "";
+            for (let i = 0; i < pathParts.length - 1; i++) {
+              currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts[i]}` : pathParts[i];
+              const folderExists = this.app.vault.getAbstractFileByPath(currentFolderPath);
+              if (!folderExists) {
+                await this.app.vault.createFolder(currentFolderPath);
+              }
+            }
+          }
+          const downloadRes = await fetch(
+            `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/download?filepath=${encodeURIComponent(attach.filepath)}`,
+            {
+              headers: {
+                "Authorization": `Bearer ${this.settings.token}`
+              }
+            }
+          );
+          if (downloadRes.ok) {
+            const arrayBuffer = await downloadRes.arrayBuffer();
+            this.isApplyingRemoteUpdate = true;
+            this.programmedModifications.add(attach.filepath);
+            try {
+              if (localFile) {
+                await this.app.vault.modifyBinary(localFile, arrayBuffer);
+              } else {
+                await this.app.vault.createBinary(attach.filepath, arrayBuffer);
+              }
+              this.settings.syncHashes[attach.filepath] = attach.hash;
+            } catch (e) {
+              this.programmedModifications.delete(attach.filepath);
+              console.error(`Failed to write binary file ${attach.filepath}`, e);
+            } finally {
+              this.isApplyingRemoteUpdate = false;
+            }
+          }
+        }
+      }
+      await this.saveSettings();
+      console.log("CoSync: Background synchronization completed successfully.");
       if (this.wsProvider?.wsconnected) {
         this.updateStatusBar("connected");
       } else {
         this.updateStatusBar("disconnected");
       }
     } catch (err) {
-      console.error("CoSync: Bulk sync failed:", err);
-      new import_obsidian.Notice(`CoSync: Bulk sync failed: ${err.message}`);
+      console.error("CoSync: Background sync failed:", err);
       this.updateStatusBar("disconnected");
+    } finally {
+      this.isSyncing = false;
     }
   }
-  /**
-   * Fetches all documents in the workspace from the server and creates local files
-   * for any documents that do not exist locally.
-   */
-  async syncNewDocumentsFromServer() {
-    if (!this.settings.token || !this.settings.workspaceId) return;
-    try {
-      console.log("CoSync: Checking server for new/missing documents...");
-      const response = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
-        method: "GET",
-        headers: {
-          "Authorization": `Bearer ${this.settings.token}`
-        }
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch documents: ${response.statusText}`);
-      }
-      const serverDocs = await response.json();
-      const localFiles = this.app.vault.getFiles().filter((file) => SYNCABLE_EXTENSIONS.has(file.extension.toLowerCase()));
-      const localCosyncIds = /* @__PURE__ */ new Set();
-      const localPaths = /* @__PURE__ */ new Set();
-      for (const file of localFiles) {
-        const isMarkdown = file.extension.toLowerCase() === "md";
-        const localPath = isMarkdown ? file.path.endsWith(".md") ? file.path.slice(0, -3) : file.path : file.path;
-        localPaths.add(localPath.toLowerCase());
-        let cosyncId = this.settings.fileMappings?.[file.path];
-        if (!cosyncId && isMarkdown) {
-          const cache = this.app.metadataCache.getFileCache(file);
-          cosyncId = cache?.frontmatter?.["cosyncId"];
-        }
-        if (cosyncId) {
-          localCosyncIds.add(cosyncId);
-        }
-      }
-      for (const doc2 of serverDocs) {
-        const docId = doc2.id;
-        const docTitle = doc2.title;
-        if (localCosyncIds.has(docId) || localPaths.has(docTitle.toLowerCase())) {
-          continue;
-        }
-        console.log(`CoSync: Server document "${docTitle}" (${docId}) is missing locally. Creating...`);
-        const pathParts = docTitle.split("/");
-        if (pathParts.length > 1) {
-          let currentFolderPath = "";
-          for (let i = 0; i < pathParts.length - 1; i++) {
-            currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts[i]}` : pathParts[i];
-            const folderExists = this.app.vault.getAbstractFileByPath(currentFolderPath);
-            if (!folderExists) {
-              await this.app.vault.createFolder(currentFolderPath);
-              console.log(`CoSync: Created local folder path "${currentFolderPath}"`);
+  async reconcileBackgroundDoc(file, docId, isMarkdown, localContent, localHash, lastSyncedHash, serverVersion) {
+    const wsUrl = this.settings.serverUrl.replace(/^http/, "ws");
+    const roomName = `workspace/${this.settings.workspaceId}/doc/${docId}`;
+    const tempYDoc = new Doc();
+    const tempWs = new WebsocketProvider(wsUrl, roomName, tempYDoc, {
+      connect: true,
+      protocols: ["co-sync-auth", this.settings.token]
+    });
+    const ytext = tempYDoc.getText("codemirror");
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        tempWs.disconnect();
+        tempWs.destroy();
+        tempYDoc.destroy();
+        resolve();
+      }, 8e3);
+      tempWs.on("sync", async (isSynced) => {
+        if (isSynced && tempYDoc) {
+          clearTimeout(timeout);
+          const serverContent = ytext.toString();
+          const serverContentWithId = isMarkdown ? injectCosyncId(serverContent, docId) : serverContent;
+          const serverHash = getContentHash(serverContentWithId);
+          if (!lastSyncedHash) {
+            if (serverContent === "") {
+              tempYDoc.transact(() => {
+                ytext.insert(0, localContent);
+              }, "local-init");
+              this.settings.syncHashes[docId] = localHash;
+              this.settings.syncVersions[docId] = serverVersion;
+            } else {
+              if (localContent !== serverContentWithId) {
+                this.isApplyingRemoteUpdate = true;
+                this.programmedModifications.add(file.path);
+                try {
+                  await this.app.vault.modify(file, serverContentWithId);
+                } catch (e) {
+                  this.programmedModifications.delete(file.path);
+                } finally {
+                  this.isApplyingRemoteUpdate = false;
+                }
+              }
+              this.settings.syncHashes[docId] = serverHash;
+              this.settings.syncVersions[docId] = serverVersion;
+            }
+          } else {
+            const localChanged = localHash !== lastSyncedHash;
+            const serverChanged = serverHash !== lastSyncedHash;
+            if (localChanged && !serverChanged) {
+              tempYDoc.transact(() => {
+                updateYTextCleanly(ytext, localContent);
+              }, "local-reconciliation-push");
+              this.settings.syncHashes[docId] = localHash;
+              this.settings.syncVersions[docId] = serverVersion;
+            } else if (!localChanged && serverChanged) {
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, serverContentWithId);
+              } catch (e) {
+                this.programmedModifications.delete(file.path);
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
+              this.settings.syncHashes[docId] = serverHash;
+              this.settings.syncVersions[docId] = serverVersion;
+            } else if (localChanged && serverChanged) {
+              tempYDoc.transact(() => {
+                updateYTextCleanly(ytext, localContent);
+              }, "local-reconciliation-merge");
+              const mergedContent = ytext.toString();
+              const mergedContentWithId = isMarkdown ? injectCosyncId(mergedContent, docId) : mergedContent;
+              const mergedHash = getContentHash(mergedContentWithId);
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, mergedContentWithId);
+              } catch (e) {
+                this.programmedModifications.delete(file.path);
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
+              this.settings.syncHashes[docId] = mergedHash;
+              this.settings.syncVersions[docId] = serverVersion;
             }
           }
-        }
-        const wsUrl = this.settings.serverUrl.replace(/^http/, "ws");
-        const roomName = `workspace/${this.settings.workspaceId}/doc/${docId}`;
-        const tempYDoc = new Doc();
-        const tempWs = new WebsocketProvider(wsUrl, roomName, tempYDoc, {
-          connect: true,
-          protocols: ["co-sync-auth", this.settings.token]
-        });
-        const ytext = tempYDoc.getText("codemirror");
-        const fileContent = await new Promise((resolve) => {
-          const timeout = setTimeout(() => {
+          setTimeout(() => {
             tempWs.disconnect();
             tempWs.destroy();
             tempYDoc.destroy();
-            resolve("");
-          }, 5e3);
-          tempWs.on("sync", (isSynced) => {
-            if (isSynced) {
-              clearTimeout(timeout);
-              const text2 = ytext.toString();
-              tempWs.disconnect();
-              tempWs.destroy();
-              tempYDoc.destroy();
-              resolve(text2);
+            resolve();
+          }, 150);
+        }
+      });
+    });
+  }
+  async downloadNewDocFromServer(docId, filepath, isMarkdown) {
+    const wsUrl = this.settings.serverUrl.replace(/^http/, "ws");
+    const roomName = `workspace/${this.settings.workspaceId}/doc/${docId}`;
+    const tempYDoc = new Doc();
+    const tempWs = new WebsocketProvider(wsUrl, roomName, tempYDoc, {
+      connect: true,
+      protocols: ["co-sync-auth", this.settings.token]
+    });
+    const ytext = tempYDoc.getText("codemirror");
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        tempWs.disconnect();
+        tempWs.destroy();
+        tempYDoc.destroy();
+        resolve();
+      }, 8e3);
+      tempWs.on("sync", async (isSynced) => {
+        if (isSynced) {
+          clearTimeout(timeout);
+          const fileContent = ytext.toString();
+          const pathParts = filepath.split("/");
+          if (pathParts.length > 1) {
+            let currentFolderPath = "";
+            for (let i = 0; i < pathParts.length - 1; i++) {
+              currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts[i]}` : pathParts[i];
+              const folderExists = this.app.vault.getAbstractFileByPath(currentFolderPath);
+              if (!folderExists) {
+                await this.app.vault.createFolder(currentFolderPath);
+              }
             }
-          });
-        });
-        const lowerTitle = docTitle.toLowerCase();
-        let fullFilePath = docTitle;
-        let isMarkdown = false;
-        if (lowerTitle.endsWith(".canvas") || lowerTitle.endsWith(".excalidraw") || lowerTitle.endsWith(".json") || lowerTitle.endsWith(".txt")) {
-          isMarkdown = false;
-        } else if (lowerTitle.endsWith(".md")) {
-          isMarkdown = true;
-        } else {
-          fullFilePath = `${docTitle}.md`;
-          isMarkdown = true;
-        }
-        const initialText = isMarkdown ? injectCosyncId(fileContent, docId) : fileContent;
-        this.isApplyingRemoteUpdate = true;
-        this.programmedModifications.add(fullFilePath);
-        try {
-          await this.app.vault.create(fullFilePath, initialText);
-          const newHash = getContentHash(initialText);
-          this.settings.syncHashes[docId] = newHash;
-          if (!this.settings.fileMappings) {
-            this.settings.fileMappings = {};
           }
-          this.settings.fileMappings[fullFilePath] = docId;
-          await this.saveSettings();
-          console.log(`CoSync: Successfully created local file "${fullFilePath}"`);
-          new import_obsidian.Notice(`CoSync: Created new local file: "${docTitle}"`);
-        } catch (err) {
-          this.programmedModifications.delete(fullFilePath);
-          console.error(`CoSync: Failed to create file "${fullFilePath}":`, err);
-        } finally {
-          this.isApplyingRemoteUpdate = false;
+          const initialText = isMarkdown ? injectCosyncId(fileContent, docId) : fileContent;
+          this.isApplyingRemoteUpdate = true;
+          this.programmedModifications.add(filepath);
+          try {
+            await this.app.vault.create(filepath, initialText);
+            const newHash = getContentHash(initialText);
+            this.settings.syncHashes[docId] = newHash;
+            this.settings.fileMappings[filepath] = docId;
+          } catch (err) {
+            this.programmedModifications.delete(filepath);
+            console.error(`Failed to create new downloaded note ${filepath}`, err);
+          } finally {
+            this.isApplyingRemoteUpdate = false;
+          }
+          tempWs.disconnect();
+          tempWs.destroy();
+          tempYDoc.destroy();
+          resolve();
         }
-      }
-    } catch (err) {
-      console.warn("CoSync: Error syncing new documents from server:", err);
-    }
+      });
+    });
   }
   getConnectionStatus() {
     return this.currentStatus;
@@ -11339,6 +11485,20 @@ var CoSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.reconnect();
       }));
     }
+    containerEl.createEl("h3", { text: "Background Synchronization" });
+    new import_obsidian.Setting(containerEl).setName("Enable Background Sync").setDesc("Automatically synchronize all notes and attachments in the background.").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableBackgroundSync).onChange(async (value) => {
+      this.plugin.settings.enableBackgroundSync = value;
+      await this.plugin.saveSettings();
+      this.plugin.startPeriodicSync();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Sync Interval (seconds)").setDesc("How often (in seconds) the background synchronization should run.").addText((text2) => text2.setPlaceholder("30").setValue(String(this.plugin.settings.syncInterval)).onChange(async (value) => {
+      const val = parseInt(value.trim(), 10);
+      if (!isNaN(val) && val >= 0) {
+        this.plugin.settings.syncInterval = val;
+        await this.plugin.saveSettings();
+        this.plugin.startPeriodicSync();
+      }
+    }));
     containerEl.createEl("h3", { text: "Vault Synchronization" });
     new import_obsidian.Setting(containerEl).setName("Sync Local Vault to Web").setDesc("Upload and sync all markdown files in your vault to the connected workspace.").addButton((btn) => btn.setButtonText("Sync Entire Vault Now").setCta().onClick(async () => {
       btn.setDisabled(true);
@@ -11384,6 +11544,14 @@ function getContentHash(str) {
   let hash = 5381;
   for (let i = 0; i < str.length; i++) {
     hash = hash * 33 ^ str.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+}
+function getBinaryHash(buffer) {
+  const view = new Uint8Array(buffer);
+  let hash = 5381;
+  for (let i = 0; i < view.length; i++) {
+    hash = hash * 33 ^ view[i];
   }
   return (hash >>> 0).toString(36);
 }

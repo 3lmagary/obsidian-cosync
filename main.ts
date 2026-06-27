@@ -11,9 +11,12 @@ interface CoSyncSettings {
   workspaceId: string;
   connectionCode: string;
   syncHashes: Record<string, string>;
+  syncVersions: Record<string, number>;
   fileMappings: Record<string, string>;
   displayName: string;
   showManualSettings: boolean;
+  syncInterval: number;
+  enableBackgroundSync: boolean;
 }
 
 const DEFAULT_SETTINGS: CoSyncSettings = {
@@ -22,9 +25,12 @@ const DEFAULT_SETTINGS: CoSyncSettings = {
   workspaceId: 'ws-default',
   connectionCode: '',
   syncHashes: {},
+  syncVersions: {},
   fileMappings: {},
   displayName: 'Obsidian User',
-  showManualSettings: false
+  showManualSettings: false,
+  syncInterval: 30,
+  enableBackgroundSync: true
 };
 
 const SYNCABLE_EXTENSIONS = new Set(['md', 'canvas', 'excalidraw', 'json', 'txt']);
@@ -50,6 +56,7 @@ class CoSyncPlugin extends Plugin {
   private syncTimeout: NodeJS.Timeout | null = null;
   private statusBarEl: HTMLElement | null = null;
   private currentStatus: 'connected' | 'connecting' | 'disconnected' | 'syncing' = 'disconnected';
+  private isSyncing = false;
 
   private updateStatusBar(status: 'connected' | 'connecting' | 'disconnected' | 'syncing', customText?: string) {
     this.currentStatus = status;
@@ -153,10 +160,20 @@ class CoSyncPlugin extends Plugin {
     // Initial check
     this.handleFileSwitch();
 
-    // Start periodic check for new documents from server (every 15 seconds)
-    this.syncTimer = setInterval(() => this.syncNewDocumentsFromServer(), 15000);
+    // Start periodic background synchronization
+    this.startPeriodicSync();
     // Also run once immediately on load
-    setTimeout(() => this.syncNewDocumentsFromServer(), 1000);
+    setTimeout(() => this.syncVault(), 2000);
+  }
+
+  public startPeriodicSync() {
+    if (this.syncTimer) {
+      clearInterval(this.syncTimer);
+      this.syncTimer = null;
+    }
+    if (this.settings.enableBackgroundSync && this.settings.syncInterval > 0) {
+      this.syncTimer = setInterval(() => this.syncVault(), this.settings.syncInterval * 1000);
+    }
   }
 
   onunload() {
@@ -839,282 +856,434 @@ class CoSyncPlugin extends Plugin {
   }
 
   async syncEntireVault() {
-    try {
-      const files = this.app.vault.getFiles().filter(file => SYNCABLE_EXTENSIONS.has(file.extension.toLowerCase()));
-      new Notice(`CoSync: Starting synchronization of ${files.length} notes...`);
-      this.updateStatusBar('syncing', `CoSync: Syncing (0/${files.length}) ⬆️`);
+    new Notice('CoSync: Triggering vault synchronization...');
+    await this.syncVault();
+  }
 
-      // 1. Fetch server documents list once
-      const response = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
+  async syncVault() {
+    if (this.isSyncing) return;
+    if (!this.settings.token || !this.settings.workspaceId) return;
+
+    this.isSyncing = true;
+    console.log('CoSync: Starting background synchronization...');
+    this.updateStatusBar('syncing');
+
+    try {
+      // 1. Fetch server documents
+      const docsResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${this.settings.token}`
         }
       });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch documents from server: ${response.statusText}`);
+      if (!docsResponse.ok) {
+        throw new Error(`Failed to fetch documents: ${docsResponse.statusText}`);
       }
+      const serverDocs: Array<{ id: string; title: string; updatedAt: string; version: number }> = await docsResponse.json();
 
-      const serverDocs: any[] = await response.json();
-      const serverDocMap = new Map<string, string>();
-      const serverDocIdSet = new Set<string>();
-      serverDocs.forEach((d: any) => {
-        serverDocMap.set(d.title.trim().toLowerCase(), d.id);
-        serverDocIdSet.add(d.id);
+      // 2. Fetch server attachments
+      const attachResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.settings.token}`
+        }
+      });
+      if (!attachResponse.ok) {
+        throw new Error(`Failed to fetch attachments: ${attachResponse.statusText}`);
+      }
+      const serverAttachments: Array<{ id: string; filepath: string; hash: string; size: number }> = await attachResponse.json();
+      const serverAttachMap = new Map(serverAttachments.map(a => [a.filepath.toLowerCase(), a]));
+
+      // 3. Scan local files
+      const localFiles = this.app.vault.getFiles();
+      const localSyncable = localFiles.filter(f => SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase()));
+      const localBinary = localFiles.filter(f => !SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase()));
+
+      const localSyncableMap = new Map(localSyncable.map(f => [f.path.toLowerCase(), f]));
+      const localBinaryMap = new Map(localBinary.map(f => [f.path.toLowerCase(), f]));
+
+      // Keep track of mapped document IDs on server
+      const serverDocIdMap = new Map<string, typeof serverDocs[0]>();
+      const serverDocTitleMap = new Map<string, typeof serverDocs[0]>();
+      serverDocs.forEach(d => {
+        serverDocIdMap.set(d.id, d);
+        serverDocTitleMap.set(d.title.trim().toLowerCase(), d);
       });
 
-      let syncedCount = 0;
-      let failedCount = 0;
+      // --- STEP A: Sync Documents (Text, Canvas, JSON, Excalidraw) ---
+      for (const file of localSyncable) {
+        const isMarkdown = file.extension.toLowerCase() === 'md';
+        const title = isMarkdown ? (file.path.endsWith('.md') ? file.path.slice(0, -3) : file.path) : file.path;
 
-      // We process files in batches of 5 to avoid API rate limiting/overload
-      const BATCH_SIZE = 5;
-      for (let i = 0; i < files.length; i += BATCH_SIZE) {
-        const batch = files.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map(async (file) => {
-          try {
-            const fileContent = await this.app.vault.read(file);
-            const isMarkdown = file.extension.toLowerCase() === 'md';
-            const title = isMarkdown ? (file.path.endsWith('.md') ? file.path.slice(0, -3) : file.path) : file.path;
-            
-            // Check if mapping already exists
-            let docId: string | undefined = this.settings.fileMappings?.[file.path];
-            
-            // Or if it is in frontmatter
-            if (!docId && isMarkdown) {
-              const cache = this.app.metadataCache.getFileCache(file);
-              docId = cache?.frontmatter?.['cosyncId'];
-            }
+        let docId = this.settings.fileMappings[file.path];
+        if (!docId && isMarkdown) {
+          const cache = this.app.metadataCache.getFileCache(file);
+          docId = cache?.frontmatter?.['cosyncId'];
+        }
 
-            // Verify if the docId we found actually exists on the server
-            const existsOnServer = docId && serverDocIdSet.has(docId);
-            const serverDocIdByTitle = serverDocMap.get(title.trim().toLowerCase());
+        // Verify if it exists on server
+        let existsOnServer = docId && serverDocIdMap.has(docId);
+        let matchedServerDoc = existsOnServer ? serverDocIdMap.get(docId!) : serverDocTitleMap.get(title.trim().toLowerCase());
 
-            if (existsOnServer && docId) {
-              // Document already exists on server, just map it locally
-              this.settings.fileMappings[file.path] = docId;
-              const contentWithId = isMarkdown ? injectCosyncId(fileContent, docId) : fileContent;
-              this.settings.syncHashes[docId] = getContentHash(contentWithId);
-            } else if (serverDocIdByTitle) {
-              // The local ID wasn't on the server (or was missing), but there's a document with matching title on server
-              this.settings.fileMappings[file.path] = serverDocIdByTitle;
-              const contentWithId = isMarkdown ? injectCosyncId(fileContent, serverDocIdByTitle) : fileContent;
-              this.settings.syncHashes[serverDocIdByTitle] = getContentHash(contentWithId);
-              // Update frontmatter to have the correct serverDocIdByTitle
-              if (docId !== serverDocIdByTitle && isMarkdown) {
-                this.isApplyingRemoteUpdate = true;
-                this.programmedModifications.add(file.path);
-                try {
-                  await this.app.vault.modify(file, contentWithId);
-                } catch (err) {
-                  this.programmedModifications.delete(file.path);
-                  throw err;
-                } finally {
-                  this.isApplyingRemoteUpdate = false;
-                }
-              }
-            } else {
-              // Create document on server with initial content!
-              const createResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${this.settings.token}`
-                },
-                body: JSON.stringify({ title, initialContent: fileContent })
-              });
+        if (matchedServerDoc) {
+          docId = matchedServerDoc.id;
+          this.settings.fileMappings[file.path] = docId;
 
-              if (!createResponse.ok) {
-                throw new Error(`Failed to create document: ${createResponse.statusText}`);
-              }
+          // Check if sync is needed
+          const localContent = await this.app.vault.read(file);
+          const localHash = getContentHash(localContent);
+          const lastSyncedHash = this.settings.syncHashes[docId];
+          const serverVersion = matchedServerDoc.version;
+          const lastSyncedVersion = this.settings.syncVersions[docId] || 0;
 
-              const newDoc = await createResponse.json();
-              const newDocId = newDoc.id as string;
-              
-              // Inject the cosyncId frontmatter block to the local file
-              const contentWithId = isMarkdown ? injectCosyncId(fileContent, newDocId) : fileContent;
-              
-              if (isMarkdown) {
-                this.isApplyingRemoteUpdate = true;
-                this.programmedModifications.add(file.path);
-                try {
-                  await this.app.vault.modify(file, contentWithId);
-                } catch (err) {
-                  this.programmedModifications.delete(file.path);
-                  throw err;
-                } finally {
-                  this.isApplyingRemoteUpdate = false;
-                }
-              }
+          const localChanged = localHash !== lastSyncedHash;
+          const serverChanged = serverVersion > lastSyncedVersion;
 
-              this.settings.fileMappings[file.path] = newDocId;
-              this.settings.syncHashes[newDocId] = getContentHash(contentWithId);
-            }
+          // If the file is currently open in active view and has focus, let yCollab handle real-time sync
+          const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+          const isOpenAndFocused = activeView && activeView.file?.path === file.path && activeView.editor?.hasFocus();
 
-            syncedCount++;
-            this.updateStatusBar('syncing', `CoSync: Syncing (${syncedCount}/${files.length}) ⬆️`);
-          } catch (err) {
-            console.warn(`CoSync: Failed to sync "${file.path}":`, err);
-            failedCount++;
+          if (isOpenAndFocused) {
+            // Just update our tracked version and hash to match whatever yCollab has done
+            this.settings.syncVersions[docId] = serverVersion;
+            this.settings.syncHashes[docId] = localHash;
+            continue;
           }
-        }));
-        
-        // Save settings after each batch
-        await this.saveSettings();
+
+          if (localChanged || serverChanged) {
+            console.log(`CoSync: Syncing background document "${file.path}" (localChanged=${localChanged}, serverChanged=${serverChanged})`);
+            // Run background Yjs reconciliation
+            await this.reconcileBackgroundDoc(file, docId, isMarkdown, localContent, localHash, lastSyncedHash, serverVersion);
+          }
+        } else {
+          // Document doesn't exist on server, create it
+          console.log(`CoSync: Uploading new local document "${file.path}" to server...`);
+          const fileContent = await this.app.vault.read(file);
+          const createResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${this.settings.token}`
+            },
+            body: JSON.stringify({ title, initialContent: fileContent })
+          });
+
+          if (createResponse.ok) {
+            const newDoc = await createResponse.json();
+            const newDocId = newDoc.id;
+            this.settings.fileMappings[file.path] = newDocId;
+
+            const contentWithId = isMarkdown ? injectCosyncId(fileContent, newDocId) : fileContent;
+            if (isMarkdown && contentWithId !== fileContent) {
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, contentWithId);
+              } catch (e) {
+                this.programmedModifications.delete(file.path);
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
+            }
+
+            this.settings.syncHashes[newDocId] = getContentHash(contentWithId);
+            this.settings.syncVersions[newDocId] = 0; // Will update on next fetch
+          }
+        }
       }
 
-      new Notice(`CoSync: Vault Sync complete!\nSuccess: ${syncedCount}, Failed: ${failedCount}`);
+      // Identify missing local files that exist on server
+      for (const doc of serverDocs) {
+        // If we don't have this doc mapped to any local file path
+        const isMapped = Object.values(this.settings.fileMappings).includes(doc.id);
+        if (!isMapped) {
+          // Check if a file with the same title path already exists (case-insensitive)
+          const lowerTitle = doc.title.toLowerCase();
+          let expectedPath = doc.title;
+          let isMarkdown = false;
+          if (lowerTitle.endsWith('.canvas') || lowerTitle.endsWith('.excalidraw') || lowerTitle.endsWith('.json') || lowerTitle.endsWith('.txt')) {
+            isMarkdown = false;
+          } else if (lowerTitle.endsWith('.md')) {
+            isMarkdown = true;
+          } else {
+            expectedPath = `${doc.title}.md`;
+            isMarkdown = true;
+          }
+
+          const fileExists = localSyncableMap.has(expectedPath.toLowerCase());
+          if (!fileExists) {
+            console.log(`CoSync: Document "${doc.title}" is missing locally. Downloading...`);
+            await this.downloadNewDocFromServer(doc.id, expectedPath, isMarkdown);
+          } else {
+            // File exists but mapping was missing, map it
+            const matchedFile = localSyncableMap.get(expectedPath.toLowerCase())!;
+            this.settings.fileMappings[matchedFile.path] = doc.id;
+          }
+        }
+      }
+
+      // --- STEP B: Sync Attachments (Binary files like PNG, PDF, JPG) ---
+      // Upload missing/modified attachments
+      for (const file of localBinary) {
+        const localBuffer = await this.app.vault.readBinary(file);
+        const localHash = getBinaryHash(localBuffer);
+        const lastSyncedHash = this.settings.syncHashes[file.path];
+
+        const serverAttach = serverAttachMap.get(file.path.toLowerCase());
+
+        if (!serverAttach || serverAttach.hash !== localHash || localHash !== lastSyncedHash) {
+          console.log(`CoSync: Uploading background attachment "${file.path}" (size=${localBuffer.byteLength} bytes)...`);
+          const uploadRes = await fetch(
+            `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(file.path)}&hash=${localHash}`,
+            {
+              method: 'PUT',
+              headers: {
+                'Authorization': `Bearer ${this.settings.token}`
+              },
+              body: localBuffer
+            }
+          );
+          if (uploadRes.ok) {
+            this.settings.syncHashes[file.path] = localHash;
+          }
+        }
+      }
+
+      // Download missing/modified attachments from server
+      for (const attach of serverAttachments) {
+        const localFile = localBinaryMap.get(attach.filepath.toLowerCase());
+        const lastSyncedHash = this.settings.syncHashes[attach.filepath];
+
+        if (!localFile || attach.hash !== lastSyncedHash) {
+          console.log(`CoSync: Downloading background attachment "${attach.filepath}" (size=${attach.size} bytes)...`);
+          
+          // Create parent folders if needed
+          const pathParts = attach.filepath.split('/');
+          if (pathParts.length > 1) {
+            let currentFolderPath = '';
+            for (let i = 0; i < pathParts.length - 1; i++) {
+              currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts[i]}` : pathParts[i];
+              const folderExists = this.app.vault.getAbstractFileByPath(currentFolderPath);
+              if (!folderExists) {
+                await this.app.vault.createFolder(currentFolderPath);
+              }
+            }
+          }
+
+          // Download and write file
+          const downloadRes = await fetch(
+            `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/download?filepath=${encodeURIComponent(attach.filepath)}`,
+            {
+              headers: {
+                'Authorization': `Bearer ${this.settings.token}`
+              }
+            }
+          );
+          if (downloadRes.ok) {
+            const arrayBuffer = await downloadRes.arrayBuffer();
+            this.isApplyingRemoteUpdate = true;
+            this.programmedModifications.add(attach.filepath);
+            try {
+              if (localFile) {
+                await this.app.vault.modifyBinary(localFile, arrayBuffer);
+              } else {
+                await this.app.vault.createBinary(attach.filepath, arrayBuffer);
+              }
+              this.settings.syncHashes[attach.filepath] = attach.hash;
+            } catch (e) {
+              this.programmedModifications.delete(attach.filepath);
+              console.error(`Failed to write binary file ${attach.filepath}`, e);
+            } finally {
+              this.isApplyingRemoteUpdate = false;
+            }
+          }
+        }
+      }
+
+      await this.saveSettings();
+      console.log('CoSync: Background synchronization completed successfully.');
       
-      // Reset status bar back to connected if active, or offline
       if (this.wsProvider?.wsconnected) {
         this.updateStatusBar('connected');
       } else {
         this.updateStatusBar('disconnected');
       }
-    } catch (err: any) {
-      console.error('CoSync: Bulk sync failed:', err);
-      new Notice(`CoSync: Bulk sync failed: ${err.message}`);
+    } catch (err) {
+      console.error('CoSync: Background sync failed:', err);
       this.updateStatusBar('disconnected');
+    } finally {
+      this.isSyncing = false;
     }
   }
 
-  /**
-   * Fetches all documents in the workspace from the server and creates local files
-   * for any documents that do not exist locally.
-   */
-  private async syncNewDocumentsFromServer() {
-    if (!this.settings.token || !this.settings.workspaceId) return;
+  private async reconcileBackgroundDoc(
+    file: TFile,
+    docId: string,
+    isMarkdown: boolean,
+    localContent: string,
+    localHash: string,
+    lastSyncedHash: string | undefined,
+    serverVersion: number
+  ): Promise<void> {
+    const wsUrl = this.settings.serverUrl.replace(/^http/, 'ws');
+    const roomName = `workspace/${this.settings.workspaceId}/doc/${docId}`;
+    const tempYDoc = new Y.Doc();
+    const tempWs = new WebsocketProvider(wsUrl, roomName, tempYDoc, {
+      connect: true,
+      protocols: ['co-sync-auth', this.settings.token]
+    });
+    const ytext = tempYDoc.getText('codemirror');
 
-    try {
-      console.log('CoSync: Checking server for new/missing documents...');
-      const response = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${this.settings.token}`
-        }
-      });
+    return new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        tempWs.disconnect();
+        tempWs.destroy();
+        tempYDoc.destroy();
+        resolve();
+      }, 8000);
 
-      if (!response.ok) {
-        throw new Error(`Failed to fetch documents: ${response.statusText}`);
-      }
+      tempWs.on('sync', async (isSynced: boolean) => {
+        if (isSynced && tempYDoc) {
+          clearTimeout(timeout);
+          const serverContent = ytext.toString();
+          const serverContentWithId = isMarkdown ? injectCosyncId(serverContent, docId) : serverContent;
+          const serverHash = getContentHash(serverContentWithId);
 
-      const serverDocs: any[] = await response.json();
-      const localFiles = this.app.vault.getFiles().filter(file => SYNCABLE_EXTENSIONS.has(file.extension.toLowerCase()));
+          if (!lastSyncedHash) {
+            // First time sync
+            if (serverContent === '') {
+              tempYDoc.transact(() => {
+                ytext.insert(0, localContent);
+              }, 'local-init');
+              this.settings.syncHashes[docId] = localHash;
+              this.settings.syncVersions[docId] = serverVersion;
+            } else {
+              if (localContent !== serverContentWithId) {
+                this.isApplyingRemoteUpdate = true;
+                this.programmedModifications.add(file.path);
+                try {
+                  await this.app.vault.modify(file, serverContentWithId);
+                } catch (e) {
+                  this.programmedModifications.delete(file.path);
+                } finally {
+                  this.isApplyingRemoteUpdate = false;
+                }
+              }
+              this.settings.syncHashes[docId] = serverHash;
+              this.settings.syncVersions[docId] = serverVersion;
+            }
+          } else {
+            const localChanged = localHash !== lastSyncedHash;
+            const serverChanged = serverHash !== lastSyncedHash;
 
-      // Read all local files to build a map of existing cosyncIds and paths
-      const localCosyncIds = new Set<string>();
-      const localPaths = new Set<string>();
+            if (localChanged && !serverChanged) {
+              tempYDoc.transact(() => {
+                updateYTextCleanly(ytext, localContent);
+              }, 'local-reconciliation-push');
+              this.settings.syncHashes[docId] = localHash;
+              this.settings.syncVersions[docId] = serverVersion;
+            } else if (!localChanged && serverChanged) {
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, serverContentWithId);
+              } catch (e) {
+                this.programmedModifications.delete(file.path);
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
+              this.settings.syncHashes[docId] = serverHash;
+              this.settings.syncVersions[docId] = serverVersion;
+            } else if (localChanged && serverChanged) {
+              tempYDoc.transact(() => {
+                updateYTextCleanly(ytext, localContent);
+              }, 'local-reconciliation-merge');
+              const mergedContent = ytext.toString();
+              const mergedContentWithId = isMarkdown ? injectCosyncId(mergedContent, docId) : mergedContent;
+              const mergedHash = getContentHash(mergedContentWithId);
 
-      for (const file of localFiles) {
-        const isMarkdown = file.extension.toLowerCase() === 'md';
-        const localPath = isMarkdown ? (file.path.endsWith('.md') ? file.path.slice(0, -3) : file.path) : file.path;
-        localPaths.add(localPath.toLowerCase());
-
-        let cosyncId = this.settings.fileMappings?.[file.path];
-        if (!cosyncId && isMarkdown) {
-          const cache = this.app.metadataCache.getFileCache(file);
-          cosyncId = cache?.frontmatter?.['cosyncId'];
-        }
-        if (cosyncId) {
-          localCosyncIds.add(cosyncId);
-        }
-      }
-
-      // Identify server documents that do not exist locally
-      for (const doc of serverDocs) {
-        const docId = doc.id;
-        const docTitle = doc.title;
-
-        if (localCosyncIds.has(docId) || localPaths.has(docTitle.toLowerCase())) {
-          continue;
-        }
-
-        console.log(`CoSync: Server document "${docTitle}" (${docId}) is missing locally. Creating...`);
-
-        // 1. Create parent folders if they do not exist
-        const pathParts = docTitle.split('/');
-        if (pathParts.length > 1) {
-          let currentFolderPath = '';
-          for (let i = 0; i < pathParts.length - 1; i++) {
-            currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts[i]}` : pathParts[i];
-            const folderExists = this.app.vault.getAbstractFileByPath(currentFolderPath);
-            if (!folderExists) {
-              await this.app.vault.createFolder(currentFolderPath);
-              console.log(`CoSync: Created local folder path "${currentFolderPath}"`);
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, mergedContentWithId);
+              } catch (e) {
+                this.programmedModifications.delete(file.path);
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
+              this.settings.syncHashes[docId] = mergedHash;
+              this.settings.syncVersions[docId] = serverVersion;
             }
           }
-        }
 
-        // 2. Fetch the text content of this document from Yjs
-        const wsUrl = this.settings.serverUrl.replace(/^http/, 'ws');
-        const roomName = `workspace/${this.settings.workspaceId}/doc/${docId}`;
-        const tempYDoc = new Y.Doc();
-        const tempWs = new WebsocketProvider(wsUrl, roomName, tempYDoc, {
-          connect: true,
-          protocols: ['co-sync-auth', this.settings.token]
-        });
-        const ytext = tempYDoc.getText('codemirror');
-
-        const fileContent = await new Promise<string>((resolve) => {
-          const timeout = setTimeout(() => {
+          setTimeout(() => {
             tempWs.disconnect();
             tempWs.destroy();
             tempYDoc.destroy();
-            resolve('');
-          }, 5000);
+            resolve();
+          }, 150);
+        }
+      });
+    });
+  }
 
-          tempWs.on('sync', (isSynced: boolean) => {
-            if (isSynced) {
-              clearTimeout(timeout);
-              const text = ytext.toString();
-              tempWs.disconnect();
-              tempWs.destroy();
-              tempYDoc.destroy();
-              resolve(text);
+  private async downloadNewDocFromServer(docId: string, filepath: string, isMarkdown: boolean): Promise<void> {
+    const wsUrl = this.settings.serverUrl.replace(/^http/, 'ws');
+    const roomName = `workspace/${this.settings.workspaceId}/doc/${docId}`;
+    const tempYDoc = new Y.Doc();
+    const tempWs = new WebsocketProvider(wsUrl, roomName, tempYDoc, {
+      connect: true,
+      protocols: ['co-sync-auth', this.settings.token]
+    });
+    const ytext = tempYDoc.getText('codemirror');
+
+    return new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        tempWs.disconnect();
+        tempWs.destroy();
+        tempYDoc.destroy();
+        resolve();
+      }, 8000);
+
+      tempWs.on('sync', async (isSynced: boolean) => {
+        if (isSynced) {
+          clearTimeout(timeout);
+          const fileContent = ytext.toString();
+
+          const pathParts = filepath.split('/');
+          if (pathParts.length > 1) {
+            let currentFolderPath = '';
+            for (let i = 0; i < pathParts.length - 1; i++) {
+              currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts[i]}` : pathParts[i];
+              const folderExists = this.app.vault.getAbstractFileByPath(currentFolderPath);
+              if (!folderExists) {
+                await this.app.vault.createFolder(currentFolderPath);
+              }
             }
-          });
-        });
-
-        // 3. Create the file locally
-        const lowerTitle = docTitle.toLowerCase();
-        let fullFilePath = docTitle;
-        let isMarkdown = false;
-        
-        if (lowerTitle.endsWith('.canvas') || lowerTitle.endsWith('.excalidraw') || lowerTitle.endsWith('.json') || lowerTitle.endsWith('.txt')) {
-          isMarkdown = false;
-        } else if (lowerTitle.endsWith('.md')) {
-          isMarkdown = true;
-        } else {
-          fullFilePath = `${docTitle}.md`;
-          isMarkdown = true;
-        }
-
-        const initialText = isMarkdown ? injectCosyncId(fileContent, docId) : fileContent;
-        
-        this.isApplyingRemoteUpdate = true;
-        this.programmedModifications.add(fullFilePath);
-        try {
-          await this.app.vault.create(fullFilePath, initialText);
-          const newHash = getContentHash(initialText);
-          this.settings.syncHashes[docId] = newHash;
-          if (!this.settings.fileMappings) {
-            this.settings.fileMappings = {};
           }
-          this.settings.fileMappings[fullFilePath] = docId;
-          await this.saveSettings();
 
-          console.log(`CoSync: Successfully created local file "${fullFilePath}"`);
-          new Notice(`CoSync: Created new local file: "${docTitle}"`);
-        } catch (err) {
-          this.programmedModifications.delete(fullFilePath);
-          console.error(`CoSync: Failed to create file "${fullFilePath}":`, err);
-        } finally {
-          this.isApplyingRemoteUpdate = false;
+          const initialText = isMarkdown ? injectCosyncId(fileContent, docId) : fileContent;
+          this.isApplyingRemoteUpdate = true;
+          this.programmedModifications.add(filepath);
+          try {
+            await this.app.vault.create(filepath, initialText);
+            const newHash = getContentHash(initialText);
+            this.settings.syncHashes[docId] = newHash;
+            this.settings.fileMappings[filepath] = docId;
+          } catch (err) {
+            this.programmedModifications.delete(filepath);
+            console.error(`Failed to create new downloaded note ${filepath}`, err);
+          } finally {
+            this.isApplyingRemoteUpdate = false;
+          }
+
+          tempWs.disconnect();
+          tempWs.destroy();
+          tempYDoc.destroy();
+          resolve();
         }
-      }
-    } catch (err) {
-      console.warn('CoSync: Error syncing new documents from server:', err);
-    }
+      });
+    });
   }
 
   public getConnectionStatus() {
@@ -1307,6 +1476,34 @@ class CoSyncSettingTab extends PluginSettingTab {
           }));
     }
 
+    containerEl.createEl('h3', { text: 'Background Synchronization' });
+
+    new Setting(containerEl)
+      .setName('Enable Background Sync')
+      .setDesc('Automatically synchronize all notes and attachments in the background.')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.enableBackgroundSync)
+        .onChange(async (value) => {
+          this.plugin.settings.enableBackgroundSync = value;
+          await this.plugin.saveSettings();
+          this.plugin.startPeriodicSync();
+        }));
+
+    new Setting(containerEl)
+      .setName('Sync Interval (seconds)')
+      .setDesc('How often (in seconds) the background synchronization should run.')
+      .addText(text => text
+        .setPlaceholder('30')
+        .setValue(String(this.plugin.settings.syncInterval))
+        .onChange(async (value) => {
+          const val = parseInt(value.trim(), 10);
+          if (!isNaN(val) && val >= 0) {
+            this.plugin.settings.syncInterval = val;
+            await this.plugin.saveSettings();
+            this.plugin.startPeriodicSync();
+          }
+        }));
+
     containerEl.createEl('h3', { text: 'Vault Synchronization' });
 
     new Setting(containerEl)
@@ -1366,6 +1563,15 @@ function getContentHash(str: string): string {
   let hash = 5381;
   for (let i = 0; i < str.length; i++) {
     hash = (hash * 33) ^ str.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function getBinaryHash(buffer: ArrayBuffer): string {
+  const view = new Uint8Array(buffer);
+  let hash = 5381;
+  for (let i = 0; i < view.length; i++) {
+    hash = (hash * 33) ^ view[i];
   }
   return (hash >>> 0).toString(36);
 }
