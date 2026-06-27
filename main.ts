@@ -142,17 +142,20 @@ class CoSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('modify', (file) => {
         if (file instanceof TFile) {
-          this.handleExternalModification(file);
-
-          // Skip instant sync trigger for active Markdown file being edited (real-time yCollab handles it)
-          const activeMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-          if (activeMarkdownView && activeMarkdownView.file?.path === file.path) {
-            return;
-          }
-
-          if (this.isSyncing) return;
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
-          this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
+          this.instantSyncTimeout = setTimeout(async () => {
+            // 1. Process active note modification (if applicable)
+            await this.handleExternalModification(file);
+
+            // 2. Trigger background sync (skip if it is active markdown note being edited)
+            const activeMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+            if (activeMarkdownView && activeMarkdownView.file?.path === file.path) {
+              return;
+            }
+
+            if (this.isSyncing) return;
+            await this.syncVault();
+          }, 1500); // 1.5 seconds pause debounce
         }
       })
     );

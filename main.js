@@ -10429,14 +10429,16 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (file instanceof import_obsidian.TFile) {
-          this.handleExternalModification(file);
-          const activeMarkdownView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-          if (activeMarkdownView && activeMarkdownView.file?.path === file.path) {
-            return;
-          }
-          if (this.isSyncing) return;
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
-          this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
+          this.instantSyncTimeout = setTimeout(async () => {
+            await this.handleExternalModification(file);
+            const activeMarkdownView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+            if (activeMarkdownView && activeMarkdownView.file?.path === file.path) {
+              return;
+            }
+            if (this.isSyncing) return;
+            await this.syncVault();
+          }, 1500);
         }
       })
     );
