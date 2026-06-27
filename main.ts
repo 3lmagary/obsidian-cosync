@@ -1102,14 +1102,16 @@ class CoSyncPlugin extends Plugin {
 
       await this.saveSettings();
       console.log('CoSync: Background synchronization completed successfully.');
+      new Notice('CoSync: Vault synchronization completed successfully!');
       
       if (this.wsProvider?.wsconnected) {
         this.updateStatusBar('connected');
       } else {
         this.updateStatusBar('disconnected');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('CoSync: Background sync failed:', err);
+      new Notice(`CoSync Sync Failed: ${err.message || err}`);
       this.updateStatusBar('disconnected');
     } finally {
       this.isSyncing = false;

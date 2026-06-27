@@ -11197,6 +11197,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       }
       await this.saveSettings();
       console.log("CoSync: Background synchronization completed successfully.");
+      new import_obsidian.Notice("CoSync: Vault synchronization completed successfully!");
       if (this.wsProvider?.wsconnected) {
         this.updateStatusBar("connected");
       } else {
@@ -11204,6 +11205,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       }
     } catch (err) {
       console.error("CoSync: Background sync failed:", err);
+      new import_obsidian.Notice(`CoSync Sync Failed: ${err.message || err}`);
       this.updateStatusBar("disconnected");
     } finally {
       this.isSyncing = false;
