@@ -10531,8 +10531,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             this.isApplyingRemoteUpdate = false;
           }
           if (this.activeDocumentId) {
-            this.settings.syncHashes[this.activeDocumentId] = getContentHash(yContentWithId);
-            await this.saveSettings();
+            await this.markDocumentSynced(this.activeDocumentId, yContentWithId, getContentHash(yContentWithId));
           }
         }
       } catch (err) {
@@ -10632,6 +10631,41 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       }
       attempt++;
     }
+  }
+  async getCacheDir() {
+    const cachePath = `${this.manifest.dir}/cache`;
+    const adapter = this.app.vault.adapter;
+    if (!await adapter.exists(cachePath)) {
+      await adapter.mkdir(cachePath);
+    }
+    return cachePath;
+  }
+  async saveBaseText(docId, content) {
+    try {
+      const cacheDir = await this.getCacheDir();
+      const filePath = `${cacheDir}/${docId}.txt`;
+      await this.app.vault.adapter.write(filePath, content);
+    } catch (err) {
+      console.warn("CoSync: Failed to save base text cache:", err);
+    }
+  }
+  async readBaseText(docId) {
+    try {
+      const cacheDir = await this.getCacheDir();
+      const filePath = `${cacheDir}/${docId}.txt`;
+      const adapter = this.app.vault.adapter;
+      if (await adapter.exists(filePath)) {
+        return await adapter.read(filePath);
+      }
+    } catch (err) {
+      console.warn("CoSync: Failed to read base text cache:", err);
+    }
+    return null;
+  }
+  async markDocumentSynced(docId, content, hash) {
+    this.settings.syncHashes[docId] = hash;
+    await this.saveSettings();
+    await this.saveBaseText(docId, content);
   }
   /**
    * Splits a file's content into frontmatter and body.
@@ -10842,8 +10876,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         const localHash = getContentHash(localContent);
         const lastSyncedHash = this.settings.syncHashes[documentId];
         if (this.isYjsBound) {
-          this.settings.syncHashes[documentId] = serverHash;
-          await this.saveSettings();
+          await this.markDocumentSynced(documentId, serverContentWithId, serverHash);
           return;
         }
         if (!lastSyncedHash) {
@@ -10851,8 +10884,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             this.ydoc.transact(() => {
               ytext.insert(0, localContent);
             }, "local-init");
-            this.settings.syncHashes[documentId] = localHash;
-            await this.saveSettings();
+            await this.markDocumentSynced(documentId, localContent, localHash);
             console.log(`CoSync: Initialized empty server document with local content.`);
           } else {
             if (localContent !== serverContentWithId) {
@@ -10867,8 +10899,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
                 this.isApplyingRemoteUpdate = false;
               }
             }
-            this.settings.syncHashes[documentId] = serverHash;
-            await this.saveSettings();
+            await this.markDocumentSynced(documentId, serverContentWithId, serverHash);
             console.log(`CoSync: First-time sync completed from server content.`);
           }
         } else {
@@ -10878,8 +10909,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             this.ydoc.transact(() => {
               updateYTextCleanly(ytext, localContent);
             }, "local-reconciliation-push");
-            this.settings.syncHashes[documentId] = localHash;
-            await this.saveSettings();
+            await this.markDocumentSynced(documentId, localContent, localHash);
             console.log(`CoSync: Pushed offline local changes to server.`);
           } else if (!localChanged && serverChanged) {
             this.isApplyingRemoteUpdate = true;
@@ -10892,31 +10922,55 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             } finally {
               this.isApplyingRemoteUpdate = false;
             }
-            this.settings.syncHashes[documentId] = serverHash;
-            await this.saveSettings();
+            await this.markDocumentSynced(documentId, serverContentWithId, serverHash);
             console.log(`CoSync: Pulled offline remote changes from server.`);
           } else if (localChanged && serverChanged) {
-            console.log(`CoSync: Conflict detected on "${file.path}"! Creating conflict copy...`);
-            const conflictPath = await this.getUniqueConflictPath(file);
-            try {
-              await this.app.vault.create(conflictPath, localContent);
-              new import_obsidian.Notice(`CoSync: Conflict detected. Local changes saved to "${conflictPath.split("/").pop()}".`);
-            } catch (err) {
-              console.error("CoSync: Failed to create conflict file:", err);
+            console.log(`CoSync: Conflict detected on "${file.path}"! Attempting automated 3-way merge...`);
+            const baseText = await this.readBaseText(documentId);
+            if (baseText !== null) {
+              this.ydoc.transact(() => {
+                applyDiff(ytext, baseText, localContent);
+              }, "local-reconciliation-merge");
+              const mergedContent = ytext.toString();
+              const mergedContentWithId = isMarkdown ? injectCosyncId(mergedContent, documentId) : mergedContent;
+              const mergedHash = getContentHash(mergedContentWithId);
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, mergedContentWithId);
+              } catch (err) {
+                this.programmedModifications.delete(file.path);
+                throw err;
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
+              await this.markDocumentSynced(documentId, mergedContentWithId, mergedHash);
+              console.log(`CoSync: Automatically merged offline changes successfully.`);
+            } else {
+              console.log(`CoSync: No base text cache found. Appending local version at the bottom.`);
+              const separator = `
+
+%% CoSync Conflict Merge Suffix %%
+${localContent}
+`;
+              const mergedContentWithId = serverContentWithId + separator;
+              const mergedHash = getContentHash(mergedContentWithId);
+              this.ydoc.transact(() => {
+                updateYTextCleanly(ytext, mergedContentWithId);
+              }, "local-reconciliation-merge-fallback");
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, mergedContentWithId);
+              } catch (err) {
+                this.programmedModifications.delete(file.path);
+                throw err;
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
+              await this.markDocumentSynced(documentId, mergedContentWithId, mergedHash);
+              new import_obsidian.Notice(`CoSync: Merged local and remote edits into a single note.`);
             }
-            this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(file.path);
-            try {
-              await this.app.vault.modify(file, serverContentWithId);
-            } catch (err) {
-              this.programmedModifications.delete(file.path);
-              throw err;
-            } finally {
-              this.isApplyingRemoteUpdate = false;
-            }
-            this.settings.syncHashes[documentId] = serverHash;
-            await this.saveSettings();
-            console.log(`CoSync: Conflict resolved by downloading server version and keeping local as conflict copy.`);
           }
         }
         this.bindYjsToEditor();
@@ -10954,8 +11008,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           this.isApplyingRemoteUpdate = false;
         }
         if (this.activeDocumentId) {
-          this.settings.syncHashes[this.activeDocumentId] = getContentHash(yContentWithId);
-          await this.saveSettings();
+          await this.markDocumentSynced(this.activeDocumentId, yContentWithId, getContentHash(yContentWithId));
         }
       }
     } catch (error) {
@@ -10998,13 +11051,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           updateYTextCleanly(ytext, newContent);
         }, "external-modification");
         if (this.activeDocumentId) {
-          this.settings.syncHashes[this.activeDocumentId] = newHash;
-          await this.saveSettings();
+          await this.markDocumentSynced(this.activeDocumentId, newContent, newHash);
         }
       } else {
         if (this.activeDocumentId && this.settings.syncHashes[this.activeDocumentId] !== newHash) {
-          this.settings.syncHashes[this.activeDocumentId] = newHash;
-          await this.saveSettings();
+          await this.markDocumentSynced(this.activeDocumentId, newContent, newHash);
         }
       }
     } catch (err) {
@@ -11117,7 +11168,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           const isCurrentActiveMarkdownFile = activeMarkdownView && activeMarkdownView.file?.path === file.path;
           if (isCurrentActiveMarkdownFile) {
             this.settings.syncVersions[docId] = serverVersion;
-            this.settings.syncHashes[docId] = localHash;
+            await this.markDocumentSynced(docId, localContent, localHash);
             continue;
           }
           if (localChanged || serverChanged) {
@@ -11151,7 +11202,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
                 this.isApplyingRemoteUpdate = false;
               }
             }
-            this.settings.syncHashes[newDocId] = getContentHash(contentWithId);
+            await this.markDocumentSynced(newDocId, contentWithId, getContentHash(contentWithId));
             this.settings.syncVersions[newDocId] = 0;
           }
         }
@@ -11308,14 +11359,14 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
                   this.isApplyingRemoteUpdate = false;
                 }
               }
-              this.settings.syncHashes[docId] = serverHash;
+              await this.markDocumentSynced(docId, serverContentWithId, serverHash);
               this.settings.syncVersions[docId] = serverVersion;
             }
           } else {
             const localChanged = localHash !== lastSyncedHash;
             const serverChanged = serverHash !== lastSyncedHash;
             if (localChanged && !serverChanged) {
-              this.settings.syncHashes[docId] = localHash;
+              await this.markDocumentSynced(docId, localContent, localHash);
               this.settings.syncVersions[docId] = serverVersion;
             } else if (!localChanged && serverChanged) {
               this.isApplyingRemoteUpdate = true;
@@ -11327,27 +11378,54 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
               } finally {
                 this.isApplyingRemoteUpdate = false;
               }
-              this.settings.syncHashes[docId] = serverHash;
+              await this.markDocumentSynced(docId, serverContentWithId, serverHash);
               this.settings.syncVersions[docId] = serverVersion;
             } else if (localChanged && serverChanged) {
-              console.log(`CoSync: Conflict detected on background file "${file.path}"! Creating conflict copy...`);
-              const conflictPath = await this.getUniqueConflictPath(file);
-              try {
-                await this.app.vault.create(conflictPath, localContent);
-              } catch (err) {
-                console.error("CoSync: Failed to create conflict file:", err);
+              console.log(`CoSync: Conflict detected on background file "${file.path}"! Attempting automated 3-way merge...`);
+              const baseText = await this.readBaseText(docId);
+              if (baseText !== null) {
+                tempYDoc.transact(() => {
+                  applyDiff(ytext, baseText, localContent);
+                }, "local-reconciliation-merge");
+                const mergedContent = ytext.toString();
+                const mergedContentWithId = isMarkdown ? injectCosyncId(mergedContent, docId) : mergedContent;
+                const mergedHash = getContentHash(mergedContentWithId);
+                this.isApplyingRemoteUpdate = true;
+                this.programmedModifications.add(file.path);
+                try {
+                  await this.app.vault.modify(file, mergedContentWithId);
+                } catch (e) {
+                  this.programmedModifications.delete(file.path);
+                } finally {
+                  this.isApplyingRemoteUpdate = false;
+                }
+                await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
+                this.settings.syncVersions[docId] = serverVersion;
+                console.log(`CoSync: Automatically merged background changes successfully.`);
+              } else {
+                console.log(`CoSync: No base text cache found for background file. Appending local version.`);
+                const separator = `
+
+%% CoSync Conflict Merge Suffix %%
+${localContent}
+`;
+                const mergedContentWithId = serverContentWithId + separator;
+                const mergedHash = getContentHash(mergedContentWithId);
+                tempYDoc.transact(() => {
+                  updateYTextCleanly(ytext, mergedContentWithId);
+                }, "local-reconciliation-merge-fallback");
+                this.isApplyingRemoteUpdate = true;
+                this.programmedModifications.add(file.path);
+                try {
+                  await this.app.vault.modify(file, mergedContentWithId);
+                } catch (e) {
+                  this.programmedModifications.delete(file.path);
+                } finally {
+                  this.isApplyingRemoteUpdate = false;
+                }
+                await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
+                this.settings.syncVersions[docId] = serverVersion;
               }
-              this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
-              try {
-                await this.app.vault.modify(file, serverContentWithId);
-              } catch (e) {
-                this.programmedModifications.delete(file.path);
-              } finally {
-                this.isApplyingRemoteUpdate = false;
-              }
-              this.settings.syncHashes[docId] = serverHash;
-              this.settings.syncVersions[docId] = serverVersion;
             }
           }
           setTimeout(() => {
@@ -11397,7 +11475,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           try {
             await this.app.vault.create(filepath, initialText);
             const newHash = getContentHash(initialText);
-            this.settings.syncHashes[docId] = newHash;
+            await this.markDocumentSynced(docId, initialText, newHash);
             this.settings.fileMappings[filepath] = docId;
           } catch (err) {
             this.programmedModifications.delete(filepath);
@@ -11615,6 +11693,43 @@ function updateYTextCleanly(ytext, newText) {
   if (deleteCount > 0 || insertText2.length > 0) {
     ytext.delete(commonPrefixLen, deleteCount);
     ytext.insert(commonPrefixLen, insertText2);
+  }
+}
+function applyDiff(ytext, baseText, newText) {
+  const normalizedBase = baseText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const normalizedNew = newText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (normalizedBase === normalizedNew) return;
+  let commonPrefixLen = 0;
+  const maxLen = Math.min(normalizedBase.length, normalizedNew.length);
+  while (commonPrefixLen < maxLen && normalizedBase[commonPrefixLen] === normalizedNew[commonPrefixLen]) {
+    commonPrefixLen++;
+  }
+  if (commonPrefixLen > 0 && commonPrefixLen < normalizedBase.length) {
+    const prevCode = normalizedBase.charCodeAt(commonPrefixLen - 1);
+    if (prevCode >= 55296 && prevCode <= 56319) {
+      commonPrefixLen--;
+    }
+  }
+  let commonSuffixLen = 0;
+  const maxSuffixLen = maxLen - commonPrefixLen;
+  while (commonSuffixLen < maxSuffixLen && normalizedBase[normalizedBase.length - 1 - commonSuffixLen] === normalizedNew[normalizedNew.length - 1 - commonSuffixLen]) {
+    commonSuffixLen++;
+  }
+  if (commonSuffixLen > 0 && commonSuffixLen < normalizedBase.length) {
+    const suffixStartCode = normalizedBase.charCodeAt(normalizedBase.length - commonSuffixLen);
+    if (suffixStartCode >= 56320 && suffixStartCode <= 57343) {
+      commonSuffixLen--;
+    }
+  }
+  const deleteCount = normalizedBase.length - commonPrefixLen - commonSuffixLen;
+  const insertText2 = normalizedNew.substring(commonPrefixLen, normalizedNew.length - commonSuffixLen);
+  if (deleteCount > 0 || insertText2.length > 0) {
+    if (deleteCount > 0) {
+      ytext.delete(commonPrefixLen, deleteCount);
+    }
+    if (insertText2.length > 0) {
+      ytext.insert(commonPrefixLen, insertText2);
+    }
   }
 }
 var COSYNC_VIEW_TYPE = "cosync-collaboration-view";
