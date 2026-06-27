@@ -363,6 +363,26 @@ class CoSyncPlugin extends Plugin {
     });
   }
 
+  private async getUniqueConflictPath(file: TFile): Promise<string> {
+    const dir = file.parent ? file.parent.path : '';
+    const baseName = file.basename;
+    const ext = file.extension ? '.' + file.extension : '';
+    const device = this.settings.displayName || 'Device';
+    
+    let attempt = 0;
+    while (true) {
+      const suffix = attempt === 0 ? '' : ` (${attempt})`;
+      const conflictFileName = `${baseName} (Conflict - ${device})${suffix}${ext}`;
+      const conflictPath = dir && dir !== '/' ? `${dir}/${conflictFileName}` : conflictFileName;
+      
+      const exists = this.app.vault.getAbstractFileByPath(conflictPath);
+      if (!exists) {
+        return conflictPath;
+      }
+      attempt++;
+    }
+  }
+
   /**
    * Splits a file's content into frontmatter and body.
    */
@@ -701,15 +721,31 @@ class CoSyncPlugin extends Plugin {
             await this.saveSettings();
             console.log(`CoSync: Pulled offline remote changes from server.`);
           } else if (localChanged && serverChanged) {
-            // Both changed: overwrite server with local as conflict fallback, preventing duplication
-            console.log(`CoSync: Conflict detected! Reconciling cleanly...`);
-            this.ydoc.transact(() => {
-              updateYTextCleanly(ytext, localContent);
-            }, 'local-reconciliation-merge');
+            // Both changed: Conflict copy creation
+            console.log(`CoSync: Conflict detected on "${file.path}"! Creating conflict copy...`);
+            const conflictPath = await this.getUniqueConflictPath(file);
+            try {
+              await this.app.vault.create(conflictPath, localContent);
+              new Notice(`CoSync: Conflict detected. Local changes saved to "${conflictPath.split('/').pop()}".`);
+            } catch (err) {
+              console.error('CoSync: Failed to create conflict file:', err);
+            }
+
+            // Server content wins for the main file
+            this.isApplyingRemoteUpdate = true;
+            this.programmedModifications.add(file.path);
+            try {
+              await this.app.vault.modify(file, serverContentWithId);
+            } catch (err) {
+              this.programmedModifications.delete(file.path);
+              throw err;
+            } finally {
+              this.isApplyingRemoteUpdate = false;
+            }
             
-            this.settings.syncHashes[documentId] = localHash;
+            this.settings.syncHashes[documentId] = serverHash;
             await this.saveSettings();
-            console.log(`CoSync: Conflict resolved by pushing local changes.`);
+            console.log(`CoSync: Conflict resolved by downloading server version and keeping local as conflict copy.`);
           }
         }
 
@@ -1168,9 +1204,6 @@ class CoSyncPlugin extends Plugin {
     const roomName = `workspace/${this.settings.workspaceId}/doc/${docId}`;
     const tempYDoc = new Y.Doc();
     const ytext = tempYDoc.getText('codemirror');
-    tempYDoc.transact(() => {
-      ytext.insert(0, localContent);
-    }, 'local-init');
 
     const tempWs = new WebsocketProvider(wsUrl, roomName, tempYDoc, {
       connect: true,
@@ -1194,19 +1227,27 @@ class CoSyncPlugin extends Plugin {
 
           if (!lastSyncedHash) {
             // First time sync
-            if (localContent !== serverContentWithId) {
-              this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
-              try {
-                await this.app.vault.modify(file, serverContentWithId);
-              } catch (e) {
-                this.programmedModifications.delete(file.path);
-              } finally {
-                this.isApplyingRemoteUpdate = false;
+            if (serverContent === '') {
+              tempYDoc.transact(() => {
+                ytext.insert(0, localContent);
+              }, 'local-init');
+              this.settings.syncHashes[docId] = localHash;
+              this.settings.syncVersions[docId] = serverVersion;
+            } else {
+              if (localContent !== serverContentWithId) {
+                this.isApplyingRemoteUpdate = true;
+                this.programmedModifications.add(file.path);
+                try {
+                  await this.app.vault.modify(file, serverContentWithId);
+                } catch (e) {
+                  this.programmedModifications.delete(file.path);
+                } finally {
+                  this.isApplyingRemoteUpdate = false;
+                }
               }
+              this.settings.syncHashes[docId] = serverHash;
+              this.settings.syncVersions[docId] = serverVersion;
             }
-            this.settings.syncHashes[docId] = serverHash;
-            this.settings.syncVersions[docId] = serverVersion;
           } else {
             const localChanged = localHash !== lastSyncedHash;
             const serverChanged = serverHash !== lastSyncedHash;
@@ -1227,6 +1268,14 @@ class CoSyncPlugin extends Plugin {
               this.settings.syncHashes[docId] = serverHash;
               this.settings.syncVersions[docId] = serverVersion;
             } else if (localChanged && serverChanged) {
+              console.log(`CoSync: Conflict detected on background file "${file.path}"! Creating conflict copy...`);
+              const conflictPath = await this.getUniqueConflictPath(file);
+              try {
+                await this.app.vault.create(conflictPath, localContent);
+              } catch (err) {
+                console.error('CoSync: Failed to create conflict file:', err);
+              }
+
               this.isApplyingRemoteUpdate = true;
               this.programmedModifications.add(file.path);
               try {
