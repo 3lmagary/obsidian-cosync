@@ -10559,6 +10559,63 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     }
     this.isYjsBound = false;
   }
+  bindYjsToEditor() {
+    if (this.isYjsBound || !this.ydoc || !this.wsProvider || !this.activeFile) return;
+    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+    if (activeView && activeView.file?.path === this.activeFile.path) {
+      const editor = activeView.editor;
+      if (editor && editor.cm) {
+        const cmView5 = editor.cm;
+        const ytext = this.ydoc.getText("codemirror");
+        const editorText = cmView5.state.doc.toString().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        const ytextStr = ytext.toString().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        if (editorText !== ytextStr) {
+          console.log("CoSync: Editor and Yjs text mismatch during binding. Deferring binding until reconciled.");
+          return;
+        }
+        console.log("CoSync: Binding yCollab to active editor.");
+        const cursorListener = this.buildCursorListener(ytext);
+        const extension = [
+          yCollab(ytext, this.wsProvider.awareness),
+          cursorListener
+        ];
+        try {
+          cmView5.dispatch({
+            effects: this.yjsCompartment.reconfigure(extension)
+          });
+          this.isYjsBound = true;
+        } catch (err) {
+          console.error("CoSync: Error configuring CodeMirror compartment:", err);
+        }
+      }
+    }
+  }
+  buildCursorListener(ytext) {
+    return import_view.EditorView.updateListener.of((update) => {
+      if (!this.wsProvider || !this.activeDocumentId) return;
+      const hasFocus = update.view.hasFocus;
+      if (hasFocus) {
+        if (update.selectionSet || update.focusChanged) {
+          try {
+            const head = update.state.selection.main.head;
+            const relativePos = createRelativePositionFromTypeIndex(ytext, head);
+            this.wsProvider.awareness.setLocalStateField("cursor", {
+              anchor: relativePos,
+              head: relativePos
+            });
+          } catch (err) {
+            console.warn("CoSync: Error updating cursor awareness:", err);
+          }
+        }
+      } else if (update.focusChanged) {
+        try {
+          this.wsProvider.awareness.setLocalStateField("cursor", null);
+        } catch (err) {
+          console.warn("CoSync: Error clearing cursor awareness:", err);
+        }
+      }
+    });
+  }
   /**
    * Splits a file's content into frontmatter and body.
    */
@@ -10724,9 +10781,6 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     console.log(`Connecting to collaborative room: ${roomName}`);
     this.ydoc = new Doc();
     const ytext = this.ydoc.getText("codemirror");
-    this.ydoc.transact(() => {
-      ytext.insert(0, initialFileContent);
-    }, "local-init");
     this.wsProvider = new WebsocketProvider(wsUrl, roomName, this.ydoc, {
       connect: true,
       protocols: ["co-sync-auth", this.settings.token]
@@ -10761,30 +10815,6 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         await this.syncYDocToLocalFile();
       }, debounceDelay);
     });
-    const cursorListener = import_view.EditorView.updateListener.of((update) => {
-      if (!this.wsProvider || !this.activeDocumentId) return;
-      const hasFocus = update.view.hasFocus;
-      if (hasFocus) {
-        if (update.selectionSet || update.focusChanged) {
-          try {
-            const head = update.state.selection.main.head;
-            const relativePos = createRelativePositionFromTypeIndex(ytext, head);
-            this.wsProvider.awareness.setLocalStateField("cursor", {
-              anchor: relativePos,
-              head: relativePos
-            });
-          } catch (err) {
-            console.warn("CoSync: Error updating cursor awareness:", err);
-          }
-        }
-      } else if (update.focusChanged) {
-        try {
-          this.wsProvider.awareness.setLocalStateField("cursor", null);
-        } catch (err) {
-          console.warn("CoSync: Error clearing cursor awareness:", err);
-        }
-      }
-    });
     this.wsProvider.on("sync", async (isSynced) => {
       if (isSynced && this.activeFile === file && this.ydoc) {
         const isMarkdown = file.extension.toLowerCase() === "md";
@@ -10800,25 +10830,37 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           return;
         }
         if (!lastSyncedHash) {
-          if (localContent !== serverContentWithId) {
-            this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(file.path);
-            try {
-              await this.app.vault.modify(file, serverContentWithId);
-            } catch (err) {
-              this.programmedModifications.delete(file.path);
-              throw err;
-            } finally {
-              this.isApplyingRemoteUpdate = false;
+          if (serverContent === "") {
+            this.ydoc.transact(() => {
+              ytext.insert(0, localContent);
+            }, "local-init");
+            this.settings.syncHashes[documentId] = localHash;
+            await this.saveSettings();
+            console.log(`CoSync: Initialized empty server document with local content.`);
+          } else {
+            if (localContent !== serverContentWithId) {
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, serverContentWithId);
+              } catch (err) {
+                this.programmedModifications.delete(file.path);
+                throw err;
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
             }
+            this.settings.syncHashes[documentId] = serverHash;
+            await this.saveSettings();
+            console.log(`CoSync: First-time sync completed from server content.`);
           }
-          this.settings.syncHashes[documentId] = serverHash;
-          await this.saveSettings();
-          console.log(`CoSync: First-time sync completed.`);
         } else {
           const localChanged = localHash !== lastSyncedHash;
           const serverChanged = serverHash !== lastSyncedHash;
           if (localChanged && !serverChanged) {
+            this.ydoc.transact(() => {
+              updateYTextCleanly(ytext, localContent);
+            }, "local-reconciliation-push");
             this.settings.syncHashes[documentId] = localHash;
             await this.saveSettings();
             console.log(`CoSync: Pushed offline local changes to server.`);
@@ -10837,39 +10879,19 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             await this.saveSettings();
             console.log(`CoSync: Pulled offline remote changes from server.`);
           } else if (localChanged && serverChanged) {
-            console.log(`CoSync: Conflict detected! Writing merged changes...`);
-            this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(file.path);
-            try {
-              await this.app.vault.modify(file, serverContentWithId);
-            } catch (err) {
-              this.programmedModifications.delete(file.path);
-              throw err;
-            } finally {
-              this.isApplyingRemoteUpdate = false;
-            }
-            this.settings.syncHashes[documentId] = serverHash;
+            console.log(`CoSync: Conflict detected! Reconciling cleanly...`);
+            this.ydoc.transact(() => {
+              updateYTextCleanly(ytext, localContent);
+            }, "local-reconciliation-merge");
+            this.settings.syncHashes[documentId] = localHash;
             await this.saveSettings();
-            console.log(`CoSync: Merged conflicting changes and updated local note.`);
+            console.log(`CoSync: Conflict resolved by pushing local changes.`);
           }
         }
-        const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-        if (activeView && activeView.file?.path === file.path) {
-          const extension = [
-            yCollab(ytext, this.wsProvider.awareness),
-            cursorListener
-          ];
-          const editor = activeView.editor;
-          if (editor && editor.cm) {
-            const cmView5 = editor.cm;
-            cmView5.dispatch({
-              effects: this.yjsCompartment.reconfigure(extension)
-            });
-            this.isYjsBound = true;
-          }
-        }
+        this.bindYjsToEditor();
       }
     });
+    this.bindYjsToEditor();
   }
   /**
    * Writes remote Yjs state changes back to the active vault file.

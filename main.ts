@@ -298,6 +298,71 @@ class CoSyncPlugin extends Plugin {
     this.isYjsBound = false;
   }
 
+  private bindYjsToEditor() {
+    if (this.isYjsBound || !this.ydoc || !this.wsProvider || !this.activeFile) return;
+
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (activeView && activeView.file?.path === this.activeFile.path) {
+      const editor = activeView.editor as any;
+      if (editor && editor.cm) {
+        const cmView = editor.cm as EditorView;
+        const ytext = this.ydoc.getText('codemirror');
+        
+        // SAFEGUARD: Make sure the editor content and ytext are identical before binding to prevent duplication
+        const editorText = cmView.state.doc.toString().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const ytextStr = ytext.toString().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        if (editorText !== ytextStr) {
+          console.log('CoSync: Editor and Yjs text mismatch during binding. Deferring binding until reconciled.');
+          return;
+        }
+
+        console.log('CoSync: Binding yCollab to active editor.');
+        const cursorListener = this.buildCursorListener(ytext);
+        const extension: Extension = [
+          yCollab(ytext, this.wsProvider.awareness),
+          cursorListener
+        ];
+        
+        try {
+          cmView.dispatch({
+            effects: this.yjsCompartment.reconfigure(extension)
+          });
+          this.isYjsBound = true;
+        } catch (err) {
+          console.error('CoSync: Error configuring CodeMirror compartment:', err);
+        }
+      }
+    }
+  }
+
+  private buildCursorListener(ytext: Y.Text): Extension {
+    return EditorView.updateListener.of((update) => {
+      if (!this.wsProvider || !this.activeDocumentId) return;
+
+      const hasFocus = update.view.hasFocus;
+      if (hasFocus) {
+        if (update.selectionSet || update.focusChanged) {
+          try {
+            const head = update.state.selection.main.head;
+            const relativePos = Y.createRelativePositionFromTypeIndex(ytext, head);
+            this.wsProvider.awareness.setLocalStateField('cursor', {
+              anchor: relativePos,
+              head: relativePos
+            });
+          } catch (err) {
+            console.warn('CoSync: Error updating cursor awareness:', err);
+          }
+        }
+      } else if (update.focusChanged) {
+        try {
+          this.wsProvider.awareness.setLocalStateField('cursor', null);
+        } catch (err) {
+          console.warn('CoSync: Error clearing cursor awareness:', err);
+        }
+      }
+    });
+  }
+
   /**
    * Splits a file's content into frontmatter and body.
    */
@@ -506,9 +571,6 @@ class CoSyncPlugin extends Plugin {
     // Initialize Y.Doc & WS Connection
     this.ydoc = new Y.Doc();
     const ytext = this.ydoc.getText('codemirror');
-    this.ydoc.transact(() => {
-      ytext.insert(0, initialFileContent);
-    }, 'local-init');
 
     this.wsProvider = new WebsocketProvider(wsUrl, roomName, this.ydoc, {
       connect: true,
@@ -563,33 +625,6 @@ class CoSyncPlugin extends Plugin {
     // because yCollab updates CodeMirror directly, and Obsidian auto-saves
     // the active CodeMirror document to disk. Manual modify triggers editor reloads.
 
-    // Sync local cursor movements to Yjs awareness relative positions
-    const cursorListener = EditorView.updateListener.of((update) => {
-      if (!this.wsProvider || !this.activeDocumentId) return;
-
-      const hasFocus = update.view.hasFocus;
-      if (hasFocus) {
-        if (update.selectionSet || update.focusChanged) {
-          try {
-            const head = update.state.selection.main.head;
-            const relativePos = Y.createRelativePositionFromTypeIndex(ytext, head);
-            this.wsProvider.awareness.setLocalStateField('cursor', {
-              anchor: relativePos,
-              head: relativePos
-            });
-          } catch (err) {
-            console.warn('CoSync: Error updating cursor awareness:', err);
-          }
-        }
-      } else if (update.focusChanged) {
-        try {
-          this.wsProvider.awareness.setLocalStateField('cursor', null);
-        } catch (err) {
-          console.warn('CoSync: Error clearing cursor awareness:', err);
-        }
-      }
-    });
-
     // Reconcile offline modifications once synced with server
     this.wsProvider.on('sync', async (isSynced: boolean) => {
       if (isSynced && this.activeFile === file && this.ydoc) {
@@ -611,31 +646,47 @@ class CoSyncPlugin extends Plugin {
 
         if (!lastSyncedHash) {
           // Case A: First time sync
-          if (localContent !== serverContentWithId) {
-            this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(file.path);
-            try {
-              await this.app.vault.modify(file, serverContentWithId);
-            } catch (err) {
-              this.programmedModifications.delete(file.path);
-              throw err;
-            } finally {
-              this.isApplyingRemoteUpdate = false;
+          if (serverContent === '') {
+            // Server is empty, initialize it with local content
+            this.ydoc.transact(() => {
+              ytext.insert(0, localContent);
+            }, 'local-init');
+            this.settings.syncHashes[documentId] = localHash;
+            await this.saveSettings();
+            console.log(`CoSync: Initialized empty server document with local content.`);
+          } else {
+            // Server has content. Overwrite local with server.
+            if (localContent !== serverContentWithId) {
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(file.path);
+              try {
+                await this.app.vault.modify(file, serverContentWithId);
+              } catch (err) {
+                this.programmedModifications.delete(file.path);
+                throw err;
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
             }
+            this.settings.syncHashes[documentId] = serverHash;
+            await this.saveSettings();
+            console.log(`CoSync: First-time sync completed from server content.`);
           }
-          this.settings.syncHashes[documentId] = serverHash;
-          await this.saveSettings();
-          console.log(`CoSync: First-time sync completed.`);
         } else {
           // Case B: Subsequent sync
           const localChanged = localHash !== lastSyncedHash;
           const serverChanged = serverHash !== lastSyncedHash;
 
           if (localChanged && !serverChanged) {
+            // Push local changes to server cleanly
+            this.ydoc.transact(() => {
+              updateYTextCleanly(ytext, localContent);
+            }, 'local-reconciliation-push');
             this.settings.syncHashes[documentId] = localHash;
             await this.saveSettings();
             console.log(`CoSync: Pushed offline local changes to server.`);
           } else if (!localChanged && serverChanged) {
+            // Pull server changes to local note
             this.isApplyingRemoteUpdate = true;
             this.programmedModifications.add(file.path);
             try {
@@ -650,41 +701,25 @@ class CoSyncPlugin extends Plugin {
             await this.saveSettings();
             console.log(`CoSync: Pulled offline remote changes from server.`);
           } else if (localChanged && serverChanged) {
-            console.log(`CoSync: Conflict detected! Writing merged changes...`);
-            this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(file.path);
-            try {
-              await this.app.vault.modify(file, serverContentWithId);
-            } catch (err) {
-              this.programmedModifications.delete(file.path);
-              throw err;
-            } finally {
-              this.isApplyingRemoteUpdate = false;
-            }
-            this.settings.syncHashes[documentId] = serverHash;
+            // Both changed: overwrite server with local as conflict fallback, preventing duplication
+            console.log(`CoSync: Conflict detected! Reconciling cleanly...`);
+            this.ydoc.transact(() => {
+              updateYTextCleanly(ytext, localContent);
+            }, 'local-reconciliation-merge');
+            
+            this.settings.syncHashes[documentId] = localHash;
             await this.saveSettings();
-            console.log(`CoSync: Merged conflicting changes and updated local note.`);
+            console.log(`CoSync: Conflict resolved by pushing local changes.`);
           }
         }
 
-        // Bind yCollab to the editor now that ytext and the editor content are matched and reconciled
-        const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (activeView && activeView.file?.path === file.path) {
-          const extension: Extension = [
-            yCollab(ytext, this.wsProvider!.awareness),
-            cursorListener
-          ];
-          const editor = activeView.editor as any;
-          if (editor && editor.cm) {
-            const cmView = editor.cm as EditorView;
-            cmView.dispatch({
-              effects: this.yjsCompartment.reconfigure(extension)
-            });
-            this.isYjsBound = true;
-          }
-        }
+        // Try to bind yCollab now that ytext and local content match
+        this.bindYjsToEditor();
       }
     });
+
+    // Also attempt to bind yCollab immediately if possible
+    this.bindYjsToEditor();
   }
 
   /**
