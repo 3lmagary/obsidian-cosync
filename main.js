@@ -11172,6 +11172,8 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           );
           if (uploadRes.ok) {
             this.settings.syncHashes[file.path] = localHash;
+          } else {
+            throw new Error(`Failed to upload attachment "${file.path}" (HTTP ${uploadRes.status})`);
           }
         }
       }
@@ -11216,6 +11218,8 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             } finally {
               this.isApplyingRemoteUpdate = false;
             }
+          } else {
+            throw new Error(`Failed to download attachment "${attach.filepath}" (HTTP ${downloadRes.status})`);
           }
         }
       }

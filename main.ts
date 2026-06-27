@@ -1076,6 +1076,8 @@ class CoSyncPlugin extends Plugin {
           );
           if (uploadRes.ok) {
             this.settings.syncHashes[file.path] = localHash;
+          } else {
+            throw new Error(`Failed to upload attachment "${file.path}" (HTTP ${uploadRes.status})`);
           }
         }
       }
@@ -1127,6 +1129,8 @@ class CoSyncPlugin extends Plugin {
             } finally {
               this.isApplyingRemoteUpdate = false;
             }
+          } else {
+            throw new Error(`Failed to download attachment "${attach.filepath}" (HTTP ${downloadRes.status})`);
           }
         }
       }
