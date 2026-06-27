@@ -10441,7 +10441,9 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         }
       })
     );
-    this.handleFileSwitch();
+    this.app.workspace.onLayoutReady(() => {
+      this.handleFileSwitch();
+    });
     this.startPeriodicSync();
     setTimeout(() => this.syncVault(), 2e3);
   }
@@ -11062,9 +11064,8 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           const lastSyncedVersion = this.settings.syncVersions[docId] || 0;
           const localChanged = localHash !== lastSyncedHash;
           const serverChanged = serverVersion > lastSyncedVersion;
-          const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-          const isOpenAndFocused = activeView && activeView.file?.path === file.path && activeView.editor?.hasFocus();
-          if (isOpenAndFocused) {
+          const isCurrentActiveFile = this.activeFile && this.activeFile.path === file.path;
+          if (isCurrentActiveFile) {
             this.settings.syncVersions[docId] = serverVersion;
             this.settings.syncHashes[docId] = localHash;
             continue;

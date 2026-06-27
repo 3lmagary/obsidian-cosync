@@ -157,8 +157,10 @@ class CoSyncPlugin extends Plugin {
       })
     );
 
-    // Initial check
-    this.handleFileSwitch();
+    // Initial check when layout is fully loaded
+    this.app.workspace.onLayoutReady(() => {
+      this.handleFileSwitch();
+    });
 
     // Start periodic background synchronization
     this.startPeriodicSync();
@@ -939,11 +941,10 @@ class CoSyncPlugin extends Plugin {
           const localChanged = localHash !== lastSyncedHash;
           const serverChanged = serverVersion > lastSyncedVersion;
 
-          // If the file is currently open in active view and has focus, let yCollab handle real-time sync
-          const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-          const isOpenAndFocused = activeView && activeView.file?.path === file.path && activeView.editor?.hasFocus();
+          // If the file is the currently active file being edited, let the main active wsProvider handle it
+          const isCurrentActiveFile = this.activeFile && this.activeFile.path === file.path;
 
-          if (isOpenAndFocused) {
+          if (isCurrentActiveFile) {
             // Just update our tracked version and hash to match whatever yCollab has done
             this.settings.syncVersions[docId] = serverVersion;
             this.settings.syncHashes[docId] = localHash;
