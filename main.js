@@ -10363,6 +10363,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.yjsCompartment = new import_state.Compartment();
     this.syncTimer = null;
     this.syncTimeout = null;
+    this.instantSyncTimeout = null;
     this.statusBarEl = null;
     this.currentStatus = "disconnected";
     this.isSyncing = false;
@@ -10429,7 +10430,28 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       this.app.vault.on("modify", (file) => {
         if (file instanceof import_obsidian.TFile) {
           this.handleExternalModification(file);
+          const activeMarkdownView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+          if (activeMarkdownView && activeMarkdownView.file?.path === file.path) {
+            return;
+          }
+          if (this.isSyncing) return;
+          if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+          this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
         }
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        if (this.isSyncing) return;
+        if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+        this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        if (this.isSyncing) return;
+        if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+        this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
       })
     );
     this.registerEvent(
@@ -11064,8 +11086,9 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           const lastSyncedVersion = this.settings.syncVersions[docId] || 0;
           const localChanged = localHash !== lastSyncedHash;
           const serverChanged = serverVersion > lastSyncedVersion;
-          const isCurrentActiveFile = this.activeFile && this.activeFile.path === file.path;
-          if (isCurrentActiveFile) {
+          const activeMarkdownView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+          const isCurrentActiveMarkdownFile = activeMarkdownView && activeMarkdownView.file?.path === file.path;
+          if (isCurrentActiveMarkdownFile) {
             this.settings.syncVersions[docId] = serverVersion;
             this.settings.syncHashes[docId] = localHash;
             continue;

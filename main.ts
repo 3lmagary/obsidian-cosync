@@ -54,6 +54,7 @@ class CoSyncPlugin extends Plugin {
 
   private syncTimer: NodeJS.Timeout | null = null;
   private syncTimeout: NodeJS.Timeout | null = null;
+  private instantSyncTimeout: any = null;
   private statusBarEl: HTMLElement | null = null;
   private currentStatus: 'connected' | 'connecting' | 'disconnected' | 'syncing' = 'disconnected';
   private isSyncing = false;
@@ -137,12 +138,40 @@ class CoSyncPlugin extends Plugin {
       this.app.workspace.on('active-leaf-change', () => this.handleFileSwitch())
     );
 
-    // Monitor external file modifications (Git, VSCode, other sync tools)
+    // Monitor file modifications to trigger instant sync
     this.registerEvent(
       this.app.vault.on('modify', (file) => {
         if (file instanceof TFile) {
           this.handleExternalModification(file);
+
+          // Skip instant sync trigger for active Markdown file being edited (real-time yCollab handles it)
+          const activeMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+          if (activeMarkdownView && activeMarkdownView.file?.path === file.path) {
+            return;
+          }
+
+          if (this.isSyncing) return;
+          if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+          this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
         }
+      })
+    );
+
+    // Monitor file creations to trigger instant sync
+    this.registerEvent(
+      this.app.vault.on('create', (file) => {
+        if (this.isSyncing) return;
+        if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+        this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
+      })
+    );
+
+    // Monitor file deletions to trigger instant sync
+    this.registerEvent(
+      this.app.vault.on('delete', (file) => {
+        if (this.isSyncing) return;
+        if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+        this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
       })
     );
 
@@ -941,10 +970,11 @@ class CoSyncPlugin extends Plugin {
           const localChanged = localHash !== lastSyncedHash;
           const serverChanged = serverVersion > lastSyncedVersion;
 
-          // If the file is the currently active file being edited, let the main active wsProvider handle it
-          const isCurrentActiveFile = this.activeFile && this.activeFile.path === file.path;
+          // If the file is currently open in an active Markdown editor, let yCollab handle real-time sync
+          const activeMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+          const isCurrentActiveMarkdownFile = activeMarkdownView && activeMarkdownView.file?.path === file.path;
 
-          if (isCurrentActiveFile) {
+          if (isCurrentActiveMarkdownFile) {
             // Just update our tracked version and hash to match whatever yCollab has done
             this.settings.syncVersions[docId] = serverVersion;
             this.settings.syncHashes[docId] = localHash;
