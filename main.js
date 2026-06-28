@@ -10375,7 +10375,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.statusBarEl = null;
     this.currentStatus = "disconnected";
     this.isSyncing = false;
-    this.isYjsBound = false;
+    this.boundEditorView = null;
   }
   updateStatusBar(status, customText) {
     this.currentStatus = status;
@@ -10547,33 +10547,42 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     }
     this.activeFile = null;
     this.activeDocumentId = null;
-    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-    const editor = activeView?.editor;
-    if (editor && editor.cm) {
-      const cmView5 = editor.cm;
+    if (this.boundEditorView) {
       try {
-        cmView5.dispatch({
+        this.boundEditorView.dispatch({
           effects: this.yjsCompartment.reconfigure([])
         });
       } catch (err) {
         console.error("Error clearing CodeMirror compartment:", err);
       }
+      this.boundEditorView = null;
     }
-    this.isYjsBound = false;
   }
   bindYjsToEditor() {
-    if (this.isYjsBound || !this.ydoc || !this.wsProvider || !this.activeFile) return;
+    if (!this.ydoc || !this.wsProvider || !this.activeFile) return;
     const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     if (activeView && activeView.file?.path === this.activeFile.path) {
       const editor = activeView.editor;
       if (editor && editor.cm) {
         const cmView5 = editor.cm;
+        if (this.boundEditorView === cmView5) {
+          return;
+        }
         const ytext = this.ydoc.getText("codemirror");
         const editorText = cmView5.state.doc.toString().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
         const ytextStr = ytext.toString().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
         if (editorText !== ytextStr) {
           console.log("CoSync: Editor and Yjs text mismatch during binding. Deferring binding until reconciled.");
           return;
+        }
+        if (this.boundEditorView) {
+          try {
+            this.boundEditorView.dispatch({
+              effects: this.yjsCompartment.reconfigure([])
+            });
+          } catch (err) {
+            console.error("CoSync: Error clearing old editor view:", err);
+          }
         }
         console.log("CoSync: Binding yCollab to active editor.");
         const cursorListener = this.buildCursorListener(ytext);
@@ -10585,7 +10594,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           cmView5.dispatch({
             effects: this.yjsCompartment.reconfigure(extension)
           });
-          this.isYjsBound = true;
+          this.boundEditorView = cmView5;
         } catch (err) {
           console.error("CoSync: Error configuring CodeMirror compartment:", err);
         }
@@ -10595,25 +10604,16 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
   buildCursorListener(ytext) {
     return import_view.EditorView.updateListener.of((update) => {
       if (!this.wsProvider || !this.activeDocumentId) return;
-      const hasFocus = update.view.hasFocus;
-      if (hasFocus) {
-        if (update.selectionSet || update.focusChanged) {
-          try {
-            const head = update.state.selection.main.head;
-            const relativePos = createRelativePositionFromTypeIndex(ytext, head);
-            this.wsProvider.awareness.setLocalStateField("cursor", {
-              anchor: relativePos,
-              head: relativePos
-            });
-          } catch (err) {
-            console.warn("CoSync: Error updating cursor awareness:", err);
-          }
-        }
-      } else if (update.focusChanged) {
+      if (update.selectionSet || update.docChanged) {
         try {
-          this.wsProvider.awareness.setLocalStateField("cursor", null);
+          const head = update.state.selection.main.head;
+          const relativePos = createRelativePositionFromTypeIndex(ytext, head);
+          this.wsProvider.awareness.setLocalStateField("cursor", {
+            anchor: relativePos,
+            head: relativePos
+          });
         } catch (err) {
-          console.warn("CoSync: Error clearing cursor awareness:", err);
+          console.warn("CoSync: Error updating cursor awareness:", err);
         }
       }
     });
@@ -10878,7 +10878,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         const localContent = await this.app.vault.read(file);
         const localHash = getContentHash(localContent);
         const lastSyncedHash = this.settings.syncHashes[documentId];
-        if (this.isYjsBound) {
+        if (this.boundEditorView) {
           await this.markDocumentSynced(documentId, serverContentWithId, serverHash);
           return;
         }

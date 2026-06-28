@@ -67,7 +67,7 @@ class CoSyncPlugin extends Plugin {
   private statusBarEl: HTMLElement | null = null;
   private currentStatus: 'connected' | 'connecting' | 'disconnected' | 'syncing' = 'disconnected';
   private isSyncing = false;
-  private isYjsBound = false;
+  private boundEditorView: EditorView | null = null;
 
   private updateStatusBar(status: 'connected' | 'connecting' | 'disconnected' | 'syncing', customText?: string) {
     this.currentStatus = status;
@@ -288,29 +288,31 @@ class CoSyncPlugin extends Plugin {
     this.activeDocumentId = null;
 
     // Clear CodeMirror extension so it doesn't stay bound to the destroyed doc
-    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    const editor = activeView?.editor as any;
-    if (editor && editor.cm) {
-      const cmView = editor.cm as EditorView;
+    if (this.boundEditorView) {
       try {
-        cmView.dispatch({
+        this.boundEditorView.dispatch({
           effects: this.yjsCompartment.reconfigure([])
         });
       } catch (err) {
         console.error('Error clearing CodeMirror compartment:', err);
       }
+      this.boundEditorView = null;
     }
-    this.isYjsBound = false;
   }
 
   private bindYjsToEditor() {
-    if (this.isYjsBound || !this.ydoc || !this.wsProvider || !this.activeFile) return;
+    if (!this.ydoc || !this.wsProvider || !this.activeFile) return;
 
     const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (activeView && activeView.file?.path === this.activeFile.path) {
       const editor = activeView.editor as any;
       if (editor && editor.cm) {
         const cmView = editor.cm as EditorView;
+        
+        if (this.boundEditorView === cmView) {
+          return; // Already bound to this EditorView
+        }
+
         const ytext = this.ydoc.getText('codemirror');
         
         // SAFEGUARD: Make sure the editor content and ytext are identical before binding to prevent duplication
@@ -319,6 +321,17 @@ class CoSyncPlugin extends Plugin {
         if (editorText !== ytextStr) {
           console.log('CoSync: Editor and Yjs text mismatch during binding. Deferring binding until reconciled.');
           return;
+        }
+
+        // If previously bound to a different view, clear it first
+        if (this.boundEditorView) {
+          try {
+            this.boundEditorView.dispatch({
+              effects: this.yjsCompartment.reconfigure([])
+            });
+          } catch (err) {
+            console.error('CoSync: Error clearing old editor view:', err);
+          }
         }
 
         console.log('CoSync: Binding yCollab to active editor.');
@@ -332,7 +345,7 @@ class CoSyncPlugin extends Plugin {
           cmView.dispatch({
             effects: this.yjsCompartment.reconfigure(extension)
           });
-          this.isYjsBound = true;
+          this.boundEditorView = cmView;
         } catch (err) {
           console.error('CoSync: Error configuring CodeMirror compartment:', err);
         }
@@ -344,25 +357,16 @@ class CoSyncPlugin extends Plugin {
     return EditorView.updateListener.of((update) => {
       if (!this.wsProvider || !this.activeDocumentId) return;
 
-      const hasFocus = update.view.hasFocus;
-      if (hasFocus) {
-        if (update.selectionSet || update.focusChanged) {
-          try {
-            const head = update.state.selection.main.head;
-            const relativePos = Y.createRelativePositionFromTypeIndex(ytext, head);
-            this.wsProvider.awareness.setLocalStateField('cursor', {
-              anchor: relativePos,
-              head: relativePos
-            });
-          } catch (err) {
-            console.warn('CoSync: Error updating cursor awareness:', err);
-          }
-        }
-      } else if (update.focusChanged) {
+      if (update.selectionSet || update.docChanged) {
         try {
-          this.wsProvider.awareness.setLocalStateField('cursor', null);
+          const head = update.state.selection.main.head;
+          const relativePos = Y.createRelativePositionFromTypeIndex(ytext, head);
+          this.wsProvider.awareness.setLocalStateField('cursor', {
+            anchor: relativePos,
+            head: relativePos
+          });
         } catch (err) {
-          console.warn('CoSync: Error clearing cursor awareness:', err);
+          console.warn('CoSync: Error updating cursor awareness:', err);
         }
       }
     });
@@ -703,7 +707,7 @@ class CoSyncPlugin extends Plugin {
         const lastSyncedHash = this.settings.syncHashes[documentId];
 
         // If Yjs is already active/bound, let live sync handle everything.
-        if (this.isYjsBound) {
+        if (this.boundEditorView) {
           await this.markDocumentSynced(documentId, serverContentWithId, serverHash);
           return;
         }
