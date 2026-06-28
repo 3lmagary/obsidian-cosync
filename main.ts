@@ -33,7 +33,7 @@ const DEFAULT_SETTINGS: CoSyncSettings = {
   enableBackgroundSync: true
 };
 
-const SYNCABLE_EXTENSIONS = new Set(['md', 'canvas', 'excalidraw', 'json', 'txt']);
+const SYNCABLE_EXTENSIONS = new Set(['md', 'txt']);
 
 class CoSyncPlugin extends Plugin {
   settings!: CoSyncSettings;
@@ -76,28 +76,20 @@ class CoSyncPlugin extends Plugin {
       this.activateView();
     });
     
-    const dot = container.createEl('span');
-    dot.style.width = '8px';
-    dot.style.height = '8px';
-    dot.style.borderRadius = '50%';
-    dot.style.display = 'inline-block';
+    const dot = container.createEl('span', { cls: `cosync-status-dot status-${status}` });
     
     const text = container.createEl('span');
     text.style.fontSize = '12px';
     text.style.fontWeight = '500';
     
     if (status === 'connected') {
-      dot.style.backgroundColor = '#10b981'; // Green
       text.textContent = customText || 'CoSync: Connected';
     } else if (status === 'connecting') {
-      dot.style.backgroundColor = '#f59e0b'; // Yellow
       text.textContent = customText || 'CoSync: Connecting';
     } else if (status === 'disconnected') {
-      dot.style.backgroundColor = '#ef4444'; // Red
       text.textContent = customText || 'CoSync: Offline';
     } else if (status === 'syncing') {
-      dot.style.backgroundColor = '#3b82f6'; // Blue
-      text.textContent = customText || 'CoSync: Syncing ⬆️';
+      text.textContent = customText || 'CoSync: Syncing...';
     }
 
     const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
@@ -980,7 +972,6 @@ class CoSyncPlugin extends Plugin {
   }
 
   async syncEntireVault() {
-    new Notice('CoSync: Triggering vault synchronization...');
     await this.syncVault();
   }
 
@@ -1231,7 +1222,6 @@ class CoSyncPlugin extends Plugin {
 
       await this.saveSettings();
       console.log('CoSync: Background synchronization completed successfully.');
-      new Notice('CoSync: Vault synchronization completed successfully!');
       
       if (this.wsProvider?.wsconnected) {
         this.updateStatusBar('connected');

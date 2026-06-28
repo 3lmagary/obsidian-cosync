@@ -10346,7 +10346,7 @@ var DEFAULT_SETTINGS = {
   syncInterval: 30,
   enableBackgroundSync: true
 };
-var SYNCABLE_EXTENSIONS = /* @__PURE__ */ new Set(["md", "canvas", "excalidraw", "json", "txt"]);
+var SYNCABLE_EXTENSIONS = /* @__PURE__ */ new Set(["md", "txt"]);
 var CoSyncPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
@@ -10382,26 +10382,18 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     container.addEventListener("click", () => {
       this.activateView();
     });
-    const dot = container.createEl("span");
-    dot.style.width = "8px";
-    dot.style.height = "8px";
-    dot.style.borderRadius = "50%";
-    dot.style.display = "inline-block";
+    const dot = container.createEl("span", { cls: `cosync-status-dot status-${status}` });
     const text2 = container.createEl("span");
     text2.style.fontSize = "12px";
     text2.style.fontWeight = "500";
     if (status === "connected") {
-      dot.style.backgroundColor = "#10b981";
       text2.textContent = customText || "CoSync: Connected";
     } else if (status === "connecting") {
-      dot.style.backgroundColor = "#f59e0b";
       text2.textContent = customText || "CoSync: Connecting";
     } else if (status === "disconnected") {
-      dot.style.backgroundColor = "#ef4444";
       text2.textContent = customText || "CoSync: Offline";
     } else if (status === "syncing") {
-      dot.style.backgroundColor = "#3b82f6";
-      text2.textContent = customText || "CoSync: Syncing \u2B06\uFE0F";
+      text2.textContent = customText || "CoSync: Syncing...";
     }
     const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
     leaves.forEach((leaf) => {
@@ -11102,7 +11094,6 @@ ${localContent}
     this.handleFileSwitch();
   }
   async syncEntireVault() {
-    new import_obsidian.Notice("CoSync: Triggering vault synchronization...");
     await this.syncVault();
   }
   async syncVault() {
@@ -11304,7 +11295,6 @@ ${localContent}
       }
       await this.saveSettings();
       console.log("CoSync: Background synchronization completed successfully.");
-      new import_obsidian.Notice("CoSync: Vault synchronization completed successfully!");
       if (this.wsProvider?.wsconnected) {
         this.updateStatusBar("connected");
       } else {
