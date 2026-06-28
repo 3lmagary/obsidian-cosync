@@ -2,19 +2,40 @@
 /* Hidden remote cursors as requested: only broadcast local cursor, do not show remote ones */
 
 .cm-ySelection {
-  display: none !important;
+  background-color: rgba(139, 92, 246, 0.25) !important;
 }
 
 .cm-yLineSelection {
-  display: none !important;
+  background-color: rgba(139, 92, 246, 0.1) !important;
 }
 
 .cm-ySelectionCaret {
-  display: none !important;
+  position: relative;
+  border-left: 2px solid #8b5cf6 !important;
+  border-right: none;
+  margin-left: -1px;
+  margin-right: -1px;
+  box-shadow: 0 0 6px #8b5cf6;
 }
 
 .cm-ySelectionInfo {
-  display: none !important;
+  position: absolute;
+  top: -1.4em;
+  left: -2px;
+  background-color: #8b5cf6 !important;
+  color: white !important;
+  font-family: var(--font-interface), sans-serif;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  padding: 2px 6px !important;
+  border-radius: 3px !important;
+  user-select: none;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  transition: opacity 0.2s ease-in-out;
+  opacity: 1 !important;
+  z-index: 10;
 }
 
 /* CoSync Sidebar Panel Styles */

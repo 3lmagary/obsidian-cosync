@@ -10347,6 +10347,14 @@ var DEFAULT_SETTINGS = {
   enableBackgroundSync: true
 };
 var SYNCABLE_EXTENSIONS = /* @__PURE__ */ new Set(["md", "txt"]);
+function getDeterministicColor(name) {
+  const colors = ["#8b5cf6", "#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#06b6d4", "#f43f5e"];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return colors[Math.abs(hash) % colors.length];
+}
 var CoSyncPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
@@ -10836,10 +10844,10 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       this.updateStatusBar(status);
     });
     this.wsProvider.maxBackoffTime = 3e4;
+    const userName = this.settings.displayName || "Obsidian User";
     this.wsProvider.awareness.setLocalStateField("user", {
-      name: this.settings.displayName || "Obsidian User",
-      color: "#8b5cf6",
-      // Premium Indigo Cursor
+      name: userName,
+      color: getDeterministicColor(userName),
       userId: "obsidian-client"
     });
     this.wsProvider.awareness.on("change", () => {
@@ -11677,7 +11685,7 @@ var CoSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       if (this.plugin.wsProvider) {
         this.plugin.wsProvider.awareness.setLocalStateField("user", {
           name: this.plugin.settings.displayName,
-          color: "#8b5cf6",
+          color: getDeterministicColor(this.plugin.settings.displayName),
           userId: "obsidian-client"
         });
       }

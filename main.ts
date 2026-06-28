@@ -35,6 +35,15 @@ const DEFAULT_SETTINGS: CoSyncSettings = {
 
 const SYNCABLE_EXTENSIONS = new Set(['md', 'txt']);
 
+function getDeterministicColor(name: string): string {
+  const colors = ['#8b5cf6', '#3b82f6', '#10b981', '#f59e0b', '#ec4899', '#06b6d4', '#f43f5e'];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return colors[Math.abs(hash) % colors.length];
+}
+
 class CoSyncPlugin extends Plugin {
   settings!: CoSyncSettings;
   
@@ -641,9 +650,10 @@ class CoSyncPlugin extends Plugin {
     this.wsProvider.maxBackoffTime = 30000;
 
     // Set local awareness identifier
+    const userName = this.settings.displayName || 'Obsidian User';
     this.wsProvider.awareness.setLocalStateField('user', {
-      name: this.settings.displayName || 'Obsidian User',
-      color: '#8b5cf6', // Premium Indigo Cursor
+      name: userName,
+      color: getDeterministicColor(userName),
       userId: 'obsidian-client'
     });
 
@@ -1688,7 +1698,7 @@ class CoSyncSettingTab extends PluginSettingTab {
           if (this.plugin.wsProvider) {
             this.plugin.wsProvider.awareness.setLocalStateField('user', {
               name: this.plugin.settings.displayName,
-              color: '#8b5cf6',
+              color: getDeterministicColor(this.plugin.settings.displayName),
               userId: 'obsidian-client'
             });
           }
