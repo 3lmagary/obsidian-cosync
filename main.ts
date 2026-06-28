@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, TFile, PluginSettingTab, App, Setting, Notice, ItemView, WorkspaceLeaf } from 'obsidian';
+import { Plugin, MarkdownView, TFile, PluginSettingTab, App, Setting, Notice } from 'obsidian';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { yCollab } from 'y-codemirror.next';
@@ -20,14 +20,14 @@ interface CoSyncSettings {
 }
 
 const DEFAULT_SETTINGS: CoSyncSettings = {
-  serverUrl: 'http://localhost:4000',
+  serverUrl: 'https://cosync.domain',
   token: '',
   workspaceId: 'ws-default',
   connectionCode: '',
   syncHashes: {},
   syncVersions: {},
   fileMappings: {},
-  displayName: 'Obsidian User',
+  displayName: 'User',
   showManualSettings: false,
   syncInterval: 10,
   enableBackgroundSync: true
@@ -57,13 +57,17 @@ class CoSyncPlugin extends Plugin {
   private isApplyingRemoteUpdate = false;
   // Programmatic modifications tracker to prevent loopbacks from vault.modify events
   private programmedModifications: Set<string> = new Set();
+
+  // In-memory cache for server documents to optimize performance and prevent duplicate requests
+  private serverDocsCache: Array<{ id: string; title: string; updatedAt: string; version: number }> | null = null;
+  private serverDocsCacheTime = 0;
   
   // CodeMirror 6 configuration compartment
   private yjsCompartment = new Compartment();
 
   private syncTimer: NodeJS.Timeout | null = null;
   private syncTimeout: NodeJS.Timeout | null = null;
-  private instantSyncTimeout: any = null;
+  private instantSyncTimeout: ReturnType<typeof setTimeout> | null = null;
   private statusBarEl: HTMLElement | null = null;
   private currentStatus: 'connected' | 'connecting' | 'disconnected' | 'syncing' = 'disconnected';
   private isSyncing = false;
@@ -82,7 +86,7 @@ class CoSyncPlugin extends Plugin {
     container.style.cursor = 'pointer';
     container.title = 'Obsidian CoSync Status';
     container.addEventListener('click', () => {
-      this.activateView();
+      this.syncEntireVault();
     });
     
     const dot = container.createEl('span', { cls: `cosync-status-dot status-${status}` });
@@ -100,13 +104,6 @@ class CoSyncPlugin extends Plugin {
     } else if (status === 'syncing') {
       text.textContent = customText || 'CoSync: Syncing...';
     }
-
-    const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
-    leaves.forEach(leaf => {
-      if (leaf.view instanceof CoSyncView) {
-        leaf.view.render();
-      }
-    });
   }
 
   async onload() {
@@ -116,16 +113,7 @@ class CoSyncPlugin extends Plugin {
     // Register setting tab
     this.addSettingTab(new CoSyncSettingTab(this.app, this));
 
-    // Register sidebar view
-    this.registerView(
-      COSYNC_VIEW_TYPE,
-      (leaf) => new CoSyncView(leaf, this)
-    );
 
-    // Add ribbon icon
-    this.addRibbonIcon('users', 'CoSync Collaboration', () => {
-      this.activateView();
-    });
 
     // Add status bar item
     this.statusBarEl = this.addStatusBarItem();
@@ -170,6 +158,10 @@ class CoSyncPlugin extends Plugin {
     // Monitor file creations to trigger instant sync
     this.registerEvent(
       this.app.vault.on('create', (file) => {
+        if (this.programmedModifications.has(file.path)) {
+          this.programmedModifications.delete(file.path);
+          return;
+        }
         if (this.isSyncing) return;
         if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
         this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
@@ -179,6 +171,10 @@ class CoSyncPlugin extends Plugin {
     // Monitor file deletions to trigger instant sync
     this.registerEvent(
       this.app.vault.on('delete', (file) => {
+        if (this.programmedModifications.has(file.path)) {
+          this.programmedModifications.delete(file.path);
+          return;
+        }
         if (this.isSyncing) return;
         if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
         this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
@@ -257,7 +253,7 @@ class CoSyncPlugin extends Plugin {
         const currentContent = await this.app.vault.read(this.activeFile);
         const normalizeText = (str: string) => str.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
         const isMarkdown = this.activeFile.extension.toLowerCase() === 'md';
-        const yContentWithId = isMarkdown ? injectCosyncId(yContent, this.activeDocumentId!) : yContent;
+        const yContentWithId = isMarkdown ? stripCosyncId(yContent) : yContent;
         if (normalizeText(yContentWithId) !== normalizeText(currentContent)) {
           this.isApplyingRemoteUpdate = true;
           this.programmedModifications.add(this.activeFile.path);
@@ -446,6 +442,28 @@ class CoSyncPlugin extends Plugin {
     return { frontmatter: '', body: cleanContent };
   }
 
+  private async fetchServerDocuments(forceRefresh = false): Promise<any[]> {
+    const now = Date.now();
+    // Cache for 10 seconds to cover rapid file switches / batch operations
+    if (!forceRefresh && this.serverDocsCache && (now - this.serverDocsCacheTime) < 10000) {
+      return this.serverDocsCache;
+    }
+    const response = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${this.settings.token}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch documents: ${response.statusText}`);
+    }
+
+    this.serverDocsCache = await response.json();
+    this.serverDocsCacheTime = now;
+    return this.serverDocsCache!;
+  }
+
   /**
    * Resolves the CoSync document ID for a given file.
    * 1. Checks frontmatter for 'cosyncId'.
@@ -459,19 +477,8 @@ class CoSyncPlugin extends Plugin {
         this.settings.fileMappings = {};
       }
 
-      // Load server documents first to verify if they exist
-      const response = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${this.settings.token}`
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch documents: ${response.statusText}`);
-      }
-
-      const documents: any[] = await response.json();
+      // Load server documents from cached helper
+      const documents = await this.fetchServerDocuments();
       const serverDocIdSet = new Set(documents.map((d: any) => d.id));
       const title = file.path.endsWith('.md') ? file.path.slice(0, -3) : file.path;
       const matchByTitle = documents.find((d: any) => d.title.trim().toLowerCase() === title.trim().toLowerCase());
@@ -514,7 +521,7 @@ class CoSyncPlugin extends Plugin {
         if (isMarkdown) {
           // Inject / Update frontmatter to have correct server ID
           const fileContent = await this.app.vault.read(file);
-          const contentWithId = injectCosyncId(fileContent, docId);
+          const contentWithId = stripCosyncId(fileContent);
           
           this.isApplyingRemoteUpdate = true;
           this.programmedModifications.add(file.path);
@@ -549,12 +556,13 @@ class CoSyncPlugin extends Plugin {
 
       const newDoc = await createResponse.json();
       docId = newDoc.id;
+      this.serverDocsCache = null; // Invalidate cache since a new document is created
       console.log(`CoSync: Created new document on server: ${title} (${docId})`);
       
       const fileContent = await this.app.vault.read(file);
       const isMarkdown = file.extension.toLowerCase() === 'md';
       if (isMarkdown) {
-        const contentWithId = injectCosyncId(fileContent, docId);
+        const contentWithId = stripCosyncId(fileContent);
         
         this.isApplyingRemoteUpdate = true;
         this.programmedModifications.add(file.path);
@@ -662,12 +670,7 @@ class CoSyncPlugin extends Plugin {
     });
 
     this.wsProvider.awareness.on('change', () => {
-      const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
-      leaves.forEach(leaf => {
-        if (leaf.view instanceof CoSyncView) {
-          leaf.view.render();
-        }
-      });
+      // Awareness state changed (collaborators joined/left) — no UI to update
     });
 
 
@@ -700,7 +703,7 @@ class CoSyncPlugin extends Plugin {
         const isMarkdown = file.extension.toLowerCase() === 'md';
 
         const serverContent = ytext.toString();
-        const serverContentWithId = isMarkdown ? injectCosyncId(serverContent, documentId) : serverContent;
+        const serverContentWithId = isMarkdown ? stripCosyncId(serverContent) : serverContent;
         const serverHash = getContentHash(serverContentWithId);
         const localContent = await this.app.vault.read(file);
         const localHash = getContentHash(localContent);
@@ -776,7 +779,7 @@ class CoSyncPlugin extends Plugin {
               }, 'local-reconciliation-merge');
 
               const mergedContent = ytext.toString();
-              const mergedContentWithId = isMarkdown ? injectCosyncId(mergedContent, documentId) : mergedContent;
+              const mergedContentWithId = isMarkdown ? stripCosyncId(mergedContent) : mergedContent;
               const mergedHash = getContentHash(mergedContentWithId);
 
               this.isApplyingRemoteUpdate = true;
@@ -852,7 +855,7 @@ class CoSyncPlugin extends Plugin {
     }
     
     const yContent = this.ydoc.getText('codemirror').toString();
-    const yContentWithId = isMarkdown ? injectCosyncId(yContent, this.activeDocumentId!) : yContent;
+    const yContentWithId = isMarkdown ? stripCosyncId(yContent) : yContent;
 
     try {
       const currentContent = await this.app.vault.read(this.activeFile);
@@ -990,14 +993,22 @@ class CoSyncPlugin extends Plugin {
     }
 
     await this.saveData(this.settings);
-    this.handleFileSwitch(); // Reload connection with new configurations
+  }
+
+  /**
+   * Saves settings AND reconnects the active file. Only call this when
+   * the user explicitly changes connection-related settings.
+   */
+  async saveSettingsAndReconnect() {
+    await this.saveData(this.settings);
+    this.handleFileSwitch();
   }
 
   async syncEntireVault() {
-    await this.syncVault();
+    await this.syncVault(true);
   }
 
-  async syncVault() {
+  async syncVault(isManual = false) {
     if (this.isSyncing) return;
     if (!this.settings.token || !this.settings.workspaceId) return;
 
@@ -1005,18 +1016,15 @@ class CoSyncPlugin extends Plugin {
     console.log('CoSync: Starting background synchronization...');
     this.updateStatusBar('syncing');
 
+    let uploadedCount = 0;
+    let downloadedCount = 0;
+    let deletedCount = 0;
+    let reconciledCount = 0;
+    const errors: string[] = [];
+
     try {
       // 1. Fetch server documents
-      const docsResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${this.settings.token}`
-        }
-      });
-      if (!docsResponse.ok) {
-        throw new Error(`Failed to fetch documents: ${docsResponse.statusText}`);
-      }
-      const serverDocs: Array<{ id: string; title: string; updatedAt: string; version: number }> = await docsResponse.json();
+      const serverDocs = await this.fetchServerDocuments(true);
 
       // 2. Fetch server attachments
       const attachResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments`, {
@@ -1055,12 +1063,17 @@ class CoSyncPlugin extends Plugin {
         if (isMarkdown && !localSyncableMap.has(filePath.toLowerCase())) {
           console.log(`CoSync: Document "${filePath}" was deleted locally. Deleting on server...`);
           try {
-            await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`, {
+            const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`, {
               method: 'DELETE',
               headers: { 'Authorization': `Bearer ${this.settings.token}` }
             });
-          } catch (err) {
-            console.error(`CoSync: Failed to delete server document for "${filePath}":`, err);
+            if (res.ok) {
+              deletedCount++;
+            } else {
+              errors.push(`Failed to delete server document for "${filePath}": HTTP ${res.status}`);
+            }
+          } catch (err: any) {
+            errors.push(`Failed to delete server document for "${filePath}": ${err.message || err}`);
           }
           delete this.settings.fileMappings[filePath];
           delete this.settings.syncHashes[filePath];
@@ -1073,12 +1086,17 @@ class CoSyncPlugin extends Plugin {
         if (!isMarkdown && !localBinaryMap.has(filePath.toLowerCase())) {
           console.log(`CoSync: Attachment "${filePath}" was deleted locally. Deleting on server...`);
           try {
-            await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments?filepath=${encodeURIComponent(filePath)}`, {
+            const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments?filepath=${encodeURIComponent(filePath)}`, {
               method: 'DELETE',
               headers: { 'Authorization': `Bearer ${this.settings.token}` }
             });
-          } catch (err) {
-            console.error(`CoSync: Failed to delete server attachment for "${filePath}":`, err);
+            if (res.ok) {
+              deletedCount++;
+            } else {
+              errors.push(`Failed to delete server attachment for "${filePath}": HTTP ${res.status}`);
+            }
+          } catch (err: any) {
+            errors.push(`Failed to delete server attachment for "${filePath}": ${err.message || err}`);
           }
           delete this.settings.syncHashes[filePath];
         }
@@ -1111,9 +1129,10 @@ class CoSyncPlugin extends Plugin {
             this.programmedModifications.add(filePath);
             try {
               await this.app.vault.delete(localFile);
-            } catch (err) {
+              deletedCount++;
+            } catch (err: any) {
               this.programmedModifications.delete(filePath);
-              console.error(`CoSync: Failed to delete local file "${filePath}":`, err);
+              errors.push(`Failed to delete local document "${filePath}": ${err.message || err}`);
             } finally {
               this.isApplyingRemoteUpdate = false;
             }
@@ -1145,9 +1164,10 @@ class CoSyncPlugin extends Plugin {
             this.programmedModifications.add(filePath);
             try {
               await this.app.vault.delete(localFile);
-            } catch (err) {
+              deletedCount++;
+            } catch (err: any) {
               this.programmedModifications.delete(filePath);
-              console.error(`CoSync: Failed to delete local attachment "${filePath}":`, err);
+              errors.push(`Failed to delete local attachment "${filePath}": ${err.message || err}`);
             } finally {
               this.isApplyingRemoteUpdate = false;
             }
@@ -1156,10 +1176,13 @@ class CoSyncPlugin extends Plugin {
         }
       }
 
-      await this.saveSettings();
+      await this.saveData(this.settings);
 
       // --- STEP A: Sync Documents (Text, Canvas, JSON, Excalidraw) ---
       for (const file of localSyncable) {
+        // Skip log file itself to avoid self-sync loop
+        if (file.path === 'cosync-sync-log.md') continue;
+
         const isMarkdown = file.extension.toLowerCase() === 'md';
         const title = isMarkdown ? (file.path.endsWith('.md') ? file.path.slice(0, -3) : file.path) : file.path;
 
@@ -1200,42 +1223,62 @@ class CoSyncPlugin extends Plugin {
 
           if (localChanged || serverChanged) {
             console.log(`CoSync: Syncing background document "${file.path}" (localChanged=${localChanged}, serverChanged=${serverChanged})`);
-            // Run background Yjs reconciliation
-            await this.reconcileBackgroundDoc(file, docId, isMarkdown, localContent, localHash, lastSyncedHash, serverVersion);
+            try {
+              const outcome = await this.reconcileBackgroundDoc(file, docId, isMarkdown, localContent, localHash, lastSyncedHash, serverVersion);
+              if (outcome === 'uploaded') {
+                uploadedCount++;
+              } else if (outcome === 'downloaded') {
+                downloadedCount++;
+              } else if (outcome === 'merged') {
+                uploadedCount++;
+                downloadedCount++;
+                reconciledCount++;
+              }
+            } catch (err: any) {
+              errors.push(`Failed to sync document "${file.path}": ${err.message || err}`);
+            }
           }
         } else {
           // Document doesn't exist on server, create it
           console.log(`CoSync: Uploading new local document "${file.path}" to server...`);
           const fileContent = await this.app.vault.read(file);
-          const createResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${this.settings.token}`
-            },
-            body: JSON.stringify({ title, initialContent: fileContent })
-          });
+          try {
+            const createResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.settings.token}`
+              },
+              body: JSON.stringify({ title, initialContent: fileContent })
+            });
 
-          if (createResponse.ok) {
-            const newDoc = await createResponse.json();
-            const newDocId = newDoc.id;
-            this.settings.fileMappings[file.path] = newDocId;
+            if (createResponse.ok) {
+              const newDoc = await createResponse.json();
+              const newDocId = newDoc.id;
+              this.serverDocsCache = null; // Invalidate cache
+              this.settings.fileMappings[file.path] = newDocId;
 
-            const contentWithId = isMarkdown ? injectCosyncId(fileContent, newDocId) : fileContent;
-            if (isMarkdown && contentWithId !== fileContent) {
-              this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
-              try {
-                await this.app.vault.modify(file, contentWithId);
-              } catch (e) {
-                this.programmedModifications.delete(file.path);
-              } finally {
-                this.isApplyingRemoteUpdate = false;
+              const contentWithId = isMarkdown ? stripCosyncId(fileContent) : fileContent;
+              if (isMarkdown && contentWithId !== fileContent) {
+                this.isApplyingRemoteUpdate = true;
+                this.programmedModifications.add(file.path);
+                try {
+                  await this.app.vault.modify(file, contentWithId);
+                } catch (e) {
+                  this.programmedModifications.delete(file.path);
+                } finally {
+                  this.isApplyingRemoteUpdate = false;
+                }
               }
-            }
 
-            await this.markDocumentSynced(newDocId, contentWithId, getContentHash(contentWithId));
-            this.settings.syncVersions[newDocId] = 0; // Will update on next fetch
+              await this.markDocumentSynced(newDocId, contentWithId, getContentHash(contentWithId));
+              this.settings.syncVersions[newDocId] = 0; // Will update on next fetch
+              uploadedCount++;
+            } else {
+              errors.push(`Failed to upload local document "${file.path}": HTTP ${createResponse.status}`);
+            }
+          } catch (err: any) {
+            errors.push(`Failed to upload local document "${file.path}": ${err.message || err}`);
           }
         }
       }
@@ -1261,7 +1304,12 @@ class CoSyncPlugin extends Plugin {
           const fileExists = localSyncableMap.has(expectedPath.toLowerCase());
           if (!fileExists) {
             console.log(`CoSync: Document "${doc.title}" is missing locally. Downloading...`);
-            await this.downloadNewDocFromServer(doc.id, expectedPath, isMarkdown);
+            try {
+              await this.downloadNewDocFromServer(doc.id, expectedPath, isMarkdown);
+              downloadedCount++;
+            } catch (err: any) {
+              errors.push(`Failed to download server document "${doc.title}": ${err.message || err}`);
+            }
           } else {
             // File exists but mapping was missing, map it
             const matchedFile = localSyncableMap.get(expectedPath.toLowerCase())!;
@@ -1273,87 +1321,123 @@ class CoSyncPlugin extends Plugin {
       // --- STEP B: Sync Attachments (Binary files like PNG, PDF, JPG) ---
       // Upload missing/modified attachments
       for (const file of localBinary) {
-        const localBuffer = await this.app.vault.readBinary(file);
-        const localHash = getBinaryHash(localBuffer);
-        const lastSyncedHash = this.settings.syncHashes[file.path];
+        try {
+          const localBuffer = await this.app.vault.readBinary(file);
+          const localHash = getBinaryHash(localBuffer);
+          const lastSyncedHash = this.settings.syncHashes[file.path];
 
-        const serverAttach = serverAttachMap.get(file.path.toLowerCase());
+          const serverAttach = serverAttachMap.get(file.path.toLowerCase());
 
-        if (!serverAttach || serverAttach.hash !== localHash || localHash !== lastSyncedHash) {
-          console.log(`CoSync: Uploading background attachment "${file.path}" (size=${localBuffer.byteLength} bytes)...`);
-          const uploadRes = await fetch(
-            `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(file.path)}&hash=${localHash}`,
-            {
-              method: 'PUT',
-              headers: {
-                'Authorization': `Bearer ${this.settings.token}`,
-                'Content-Type': 'application/octet-stream'
-              },
-              body: localBuffer
+          if (!serverAttach || serverAttach.hash !== localHash || localHash !== lastSyncedHash) {
+            console.log(`CoSync: Uploading background attachment "${file.path}" (size=${localBuffer.byteLength} bytes)...`);
+            const uploadRes = await fetch(
+              `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(file.path)}&hash=${localHash}`,
+              {
+                method: 'PUT',
+                headers: {
+                  'Authorization': `Bearer ${this.settings.token}`,
+                  'Content-Type': 'application/octet-stream'
+                },
+                body: localBuffer
+              }
+            );
+            if (uploadRes.ok) {
+              this.settings.syncHashes[file.path] = localHash;
+              uploadedCount++;
+            } else {
+              errors.push(`Failed to upload attachment "${file.path}": HTTP ${uploadRes.status}`);
             }
-          );
-          if (uploadRes.ok) {
-            this.settings.syncHashes[file.path] = localHash;
-          } else {
-            throw new Error(`Failed to upload attachment "${file.path}" (HTTP ${uploadRes.status})`);
           }
+        } catch (err: any) {
+          errors.push(`Failed to upload attachment "${file.path}": ${err.message || err}`);
         }
       }
 
       // Download missing/modified attachments from server
       for (const attach of serverAttachments) {
-        const localFile = localBinaryMap.get(attach.filepath.toLowerCase());
-        const lastSyncedHash = this.settings.syncHashes[attach.filepath];
+        try {
+          const localFile = localBinaryMap.get(attach.filepath.toLowerCase());
+          const lastSyncedHash = this.settings.syncHashes[attach.filepath];
 
-        if (!localFile || attach.hash !== lastSyncedHash) {
-          console.log(`CoSync: Downloading background attachment "${attach.filepath}" (size=${attach.size} bytes)...`);
-          
-          // Create parent folders if needed
-          const pathParts = attach.filepath.split('/');
-          if (pathParts.length > 1) {
-            let currentFolderPath = '';
-            for (let i = 0; i < pathParts.length - 1; i++) {
-              currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts[i]}` : pathParts[i];
-              const folderExists = this.app.vault.getAbstractFileByPath(currentFolderPath);
-              if (!folderExists) {
-                await this.app.vault.createFolder(currentFolderPath);
+          if (!localFile || attach.hash !== lastSyncedHash) {
+            console.log(`CoSync: Downloading background attachment "${attach.filepath}" (size=${attach.size} bytes)...`);
+            
+            // Create parent folders if needed
+            const pathParts = attach.filepath.split('/');
+            if (pathParts.length > 1) {
+              let currentFolderPath = '';
+              for (let i = 0; i < pathParts.length - 1; i++) {
+                currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts[i]}` : pathParts[i];
+                const folderExists = this.app.vault.getAbstractFileByPath(currentFolderPath);
+                if (!folderExists) {
+                  await this.app.vault.createFolder(currentFolderPath);
+                }
               }
+            }
+
+            // Download and write file
+            const downloadRes = await fetch(
+              `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/download?filepath=${encodeURIComponent(attach.filepath)}`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${this.settings.token}`
+                }
+              }
+            );
+            if (downloadRes.ok) {
+              const arrayBuffer = await downloadRes.arrayBuffer();
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(attach.filepath);
+              try {
+                if (localFile) {
+                  await this.app.vault.modifyBinary(localFile, arrayBuffer);
+                } else {
+                  await this.app.vault.createBinary(attach.filepath, arrayBuffer);
+                }
+                this.settings.syncHashes[attach.filepath] = attach.hash;
+                downloadedCount++;
+              } catch (e: any) {
+                this.programmedModifications.delete(attach.filepath);
+                errors.push(`Failed to write binary file "${attach.filepath}": ${e.message || e}`);
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
+            } else {
+              errors.push(`Failed to download attachment "${attach.filepath}": HTTP ${downloadRes.status}`);
             }
           }
-
-          // Download and write file
-          const downloadRes = await fetch(
-            `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/download?filepath=${encodeURIComponent(attach.filepath)}`,
-            {
-              headers: {
-                'Authorization': `Bearer ${this.settings.token}`
-              }
-            }
-          );
-          if (downloadRes.ok) {
-            const arrayBuffer = await downloadRes.arrayBuffer();
-            this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(attach.filepath);
-            try {
-              if (localFile) {
-                await this.app.vault.modifyBinary(localFile, arrayBuffer);
-              } else {
-                await this.app.vault.createBinary(attach.filepath, arrayBuffer);
-              }
-              this.settings.syncHashes[attach.filepath] = attach.hash;
-            } catch (e) {
-              this.programmedModifications.delete(attach.filepath);
-              console.error(`Failed to write binary file ${attach.filepath}`, e);
-            } finally {
-              this.isApplyingRemoteUpdate = false;
-            }
-          } else {
-            throw new Error(`Failed to download attachment "${attach.filepath}" (HTTP ${downloadRes.status})`);
-          }
+        } catch (err: any) {
+          errors.push(`Failed to download attachment "${attach.filepath}": ${err.message || err}`);
         }
       }
 
-      await this.saveSettings();
+      await this.saveData(this.settings);
+      
+      // Write sync logs to cosync-sync-log.md
+      const timestamp = new Date().toLocaleString();
+      let logEntry = `### Sync Run: ${timestamp}\n`;
+      logEntry += `- **Status**: ${errors.length > 0 ? 'Completed with errors ⚠️' : 'Successful ✅'}\n`;
+      logEntry += `- **Files Uploaded**: ${uploadedCount}\n`;
+      logEntry += `- **Files Downloaded**: ${downloadedCount}\n`;
+      logEntry += `- **Files Deleted**: ${deletedCount}\n`;
+      logEntry += `- **Conflicts Reconciled**: ${reconciledCount}\n`;
+      if (errors.length > 0) {
+        logEntry += `- **Errors (${errors.length})**:\n`;
+        errors.forEach(err => {
+          logEntry += `  - \`${err}\`\n`;
+        });
+      }
+      logEntry += `\n---\n`;
+
+      const logPath = 'cosync-sync-log.md';
+      const logFile = this.app.vault.getAbstractFileByPath(logPath);
+      if (logFile instanceof TFile) {
+        const currentContent = await this.app.vault.read(logFile);
+        await this.app.vault.modify(logFile, logEntry + '\n' + currentContent);
+      } else {
+        await this.app.vault.create(logPath, `# CoSync Sync Logs\n\n` + logEntry);
+      }
+
       console.log('CoSync: Background synchronization completed successfully.');
       
       if (this.wsProvider?.wsconnected) {
@@ -1361,8 +1445,41 @@ class CoSyncPlugin extends Plugin {
       } else {
         this.updateStatusBar('disconnected');
       }
+
+      if (isManual || uploadedCount > 0 || downloadedCount > 0 || deletedCount > 0 || errors.length > 0) {
+        let msg = `CoSync Sync complete.`;
+        if (uploadedCount > 0 || downloadedCount > 0 || deletedCount > 0) {
+          msg += ` Uploaded: ${uploadedCount}, Downloaded: ${downloadedCount}, Deleted: ${deletedCount}.`;
+        } else {
+          msg += ` No changes detected.`;
+        }
+        if (errors.length > 0) {
+          msg += ` (Errors: ${errors.length}. Checked cosync-sync-log.md)`;
+        }
+        new Notice(msg);
+      }
     } catch (err: any) {
       console.error('CoSync: Background sync failed:', err);
+      errors.push(`Fatal sync error: ${err.message || err}`);
+      
+      const timestamp = new Date().toLocaleString();
+      let logEntry = `### Sync Run: ${timestamp}\n`;
+      logEntry += `- **Status**: Fatal Error ❌\n`;
+      logEntry += `- \`${err.message || err}\`\n\n---\n`;
+
+      const logPath = 'cosync-sync-log.md';
+      try {
+        const logFile = this.app.vault.getAbstractFileByPath(logPath);
+        if (logFile instanceof TFile) {
+          const currentContent = await this.app.vault.read(logFile);
+          await this.app.vault.modify(logFile, logEntry + '\n' + currentContent);
+        } else {
+          await this.app.vault.create(logPath, `# CoSync Sync Logs\n\n` + logEntry);
+        }
+      } catch (logErr) {
+        console.error('Failed to write fatal sync error to log file:', logErr);
+      }
+
       new Notice(`CoSync Sync Failed: ${err.message || err}`);
       this.updateStatusBar('disconnected');
     } finally {
@@ -1378,7 +1495,7 @@ class CoSyncPlugin extends Plugin {
     localHash: string,
     lastSyncedHash: string | undefined,
     serverVersion: number
-  ): Promise<void> {
+  ): Promise<string> {
     const wsUrl = this.settings.serverUrl.replace(/^http/, 'ws');
     const roomName = `workspace/${this.settings.workspaceId}/doc/${docId}`;
     const tempYDoc = new Y.Doc();
@@ -1389,120 +1506,139 @@ class CoSyncPlugin extends Plugin {
       protocols: ['co-sync-auth', this.settings.token]
     });
 
-    return new Promise<void>((resolve) => {
+    return new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
         tempWs.disconnect();
         tempWs.destroy();
         tempYDoc.destroy();
-        resolve();
+        reject(new Error("Sync timed out (8s limit reached)"));
       }, 8000);
 
       tempWs.on('sync', async (isSynced: boolean) => {
         if (isSynced && tempYDoc) {
           clearTimeout(timeout);
-          const serverContent = ytext.toString();
-          const serverContentWithId = isMarkdown ? injectCosyncId(serverContent, docId) : serverContent;
-          const serverHash = getContentHash(serverContentWithId);
+          let outcome = 'none';
+          try {
+            const serverContent = ytext.toString();
+            const serverContentWithId = isMarkdown ? stripCosyncId(serverContent) : serverContent;
+            const serverHash = getContentHash(serverContentWithId);
 
-          if (!lastSyncedHash) {
-            // First time sync
-            if (serverContent === '') {
-              tempYDoc.transact(() => {
-                ytext.insert(0, localContent);
-              }, 'local-init');
-              this.settings.syncHashes[docId] = localHash;
-              this.settings.syncVersions[docId] = serverVersion;
+            if (!lastSyncedHash) {
+              // First time sync
+              if (serverContent === '') {
+                tempYDoc.transact(() => {
+                  ytext.insert(0, localContent);
+                }, 'local-init');
+                this.settings.syncHashes[docId] = localHash;
+                this.settings.syncVersions[docId] = serverVersion;
+                outcome = 'uploaded';
+              } else {
+                if (localContent !== serverContentWithId) {
+                  this.isApplyingRemoteUpdate = true;
+                  this.programmedModifications.add(file.path);
+                  try {
+                    await this.app.vault.modify(file, serverContentWithId);
+                    outcome = 'downloaded';
+                  } catch (e) {
+                    this.programmedModifications.delete(file.path);
+                    throw e;
+                  } finally {
+                    this.isApplyingRemoteUpdate = false;
+                  }
+                }
+                await this.markDocumentSynced(docId, serverContentWithId, serverHash);
+                this.settings.syncVersions[docId] = serverVersion;
+              }
             } else {
-              if (localContent !== serverContentWithId) {
+              const localChanged = localHash !== lastSyncedHash;
+              const serverChanged = serverHash !== lastSyncedHash;
+
+              if (localChanged && !serverChanged) {
+                await this.markDocumentSynced(docId, localContent, localHash);
+                this.settings.syncVersions[docId] = serverVersion;
+                outcome = 'uploaded';
+              } else if (!localChanged && serverChanged) {
                 this.isApplyingRemoteUpdate = true;
                 this.programmedModifications.add(file.path);
                 try {
                   await this.app.vault.modify(file, serverContentWithId);
+                  outcome = 'downloaded';
                 } catch (e) {
                   this.programmedModifications.delete(file.path);
+                  throw e;
                 } finally {
                   this.isApplyingRemoteUpdate = false;
                 }
-              }
-              await this.markDocumentSynced(docId, serverContentWithId, serverHash);
-              this.settings.syncVersions[docId] = serverVersion;
-            }
-          } else {
-            const localChanged = localHash !== lastSyncedHash;
-            const serverChanged = serverHash !== lastSyncedHash;
-
-            if (localChanged && !serverChanged) {
-              await this.markDocumentSynced(docId, localContent, localHash);
-              this.settings.syncVersions[docId] = serverVersion;
-            } else if (!localChanged && serverChanged) {
-              this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
-              try {
-                await this.app.vault.modify(file, serverContentWithId);
-              } catch (e) {
-                this.programmedModifications.delete(file.path);
-              } finally {
-                this.isApplyingRemoteUpdate = false;
-              }
-              await this.markDocumentSynced(docId, serverContentWithId, serverHash);
-              this.settings.syncVersions[docId] = serverVersion;
-            } else if (localChanged && serverChanged) {
-              console.log(`CoSync: Conflict detected on background file "${file.path}"! Attempting automated 3-way merge...`);
-              const baseText = await this.readBaseText(docId);
-
-              if (baseText !== null) {
-                tempYDoc.transact(() => {
-                  applyDiff(ytext, baseText, localContent);
-                }, 'local-reconciliation-merge');
-
-                const mergedContent = ytext.toString();
-                const mergedContentWithId = isMarkdown ? injectCosyncId(mergedContent, docId) : mergedContent;
-                const mergedHash = getContentHash(mergedContentWithId);
-
-                this.isApplyingRemoteUpdate = true;
-                this.programmedModifications.add(file.path);
-                try {
-                  await this.app.vault.modify(file, mergedContentWithId);
-                } catch (e) {
-                  this.programmedModifications.delete(file.path);
-                } finally {
-                  this.isApplyingRemoteUpdate = false;
-                }
-                await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
+                await this.markDocumentSynced(docId, serverContentWithId, serverHash);
                 this.settings.syncVersions[docId] = serverVersion;
-                console.log(`CoSync: Automatically merged background changes successfully.`);
-              } else {
-                // No base text found (fallback): append local edits at bottom
-                console.log(`CoSync: No base text cache found for background file. Appending local version.`);
-                const separator = `\n\n%% CoSync Conflict Merge Suffix %%\n${localContent}\n`;
-                const mergedContentWithId = serverContentWithId + separator;
-                const mergedHash = getContentHash(mergedContentWithId);
+              } else if (localChanged && serverChanged) {
+                console.log(`CoSync: Conflict detected on background file "${file.path}"! Attempting automated 3-way merge...`);
+                const baseText = await this.readBaseText(docId);
 
-                // Update Yjs text to match merged
-                tempYDoc.transact(() => {
-                  updateYTextCleanly(ytext, mergedContentWithId);
-                }, 'local-reconciliation-merge-fallback');
+                if (baseText !== null) {
+                  tempYDoc.transact(() => {
+                    applyDiff(ytext, baseText, localContent);
+                  }, 'local-reconciliation-merge');
 
-                this.isApplyingRemoteUpdate = true;
-                this.programmedModifications.add(file.path);
-                try {
-                  await this.app.vault.modify(file, mergedContentWithId);
-                } catch (e) {
-                  this.programmedModifications.delete(file.path);
-                } finally {
-                  this.isApplyingRemoteUpdate = false;
+                  const mergedContent = ytext.toString();
+                  const mergedContentWithId = isMarkdown ? stripCosyncId(mergedContent) : mergedContent;
+                  const mergedHash = getContentHash(mergedContentWithId);
+
+                  this.isApplyingRemoteUpdate = true;
+                  this.programmedModifications.add(file.path);
+                  try {
+                    await this.app.vault.modify(file, mergedContentWithId);
+                    outcome = 'merged';
+                  } catch (e) {
+                    this.programmedModifications.delete(file.path);
+                    throw e;
+                  } finally {
+                    this.isApplyingRemoteUpdate = false;
+                  }
+                  await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
+                  this.settings.syncVersions[docId] = serverVersion;
+                  console.log(`CoSync: Automatically merged background changes successfully.`);
+                } else {
+                  // No base text found (fallback): append local edits at bottom
+                  console.log(`CoSync: No base text cache found for background file. Appending local version.`);
+                  const separator = `\n\n%% CoSync Conflict Merge Suffix %%\n${localContent}\n`;
+                  const mergedContentWithId = serverContentWithId + separator;
+                  const mergedHash = getContentHash(mergedContentWithId);
+
+                  // Update Yjs text to match merged
+                  tempYDoc.transact(() => {
+                    updateYTextCleanly(ytext, mergedContentWithId);
+                  }, 'local-reconciliation-merge-fallback');
+
+                  this.isApplyingRemoteUpdate = true;
+                  this.programmedModifications.add(file.path);
+                  try {
+                    await this.app.vault.modify(file, mergedContentWithId);
+                    outcome = 'merged';
+                  } catch (e) {
+                    this.programmedModifications.delete(file.path);
+                    throw e;
+                  } finally {
+                    this.isApplyingRemoteUpdate = false;
+                  }
+                  await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
+                  this.settings.syncVersions[docId] = serverVersion;
                 }
-                await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
-                this.settings.syncVersions[docId] = serverVersion;
               }
             }
+          } catch (err) {
+            tempWs.disconnect();
+            tempWs.destroy();
+            tempYDoc.destroy();
+            reject(err);
+            return;
           }
 
           setTimeout(() => {
             tempWs.disconnect();
             tempWs.destroy();
             tempYDoc.destroy();
-            resolve();
+            resolve(outcome);
           }, 150);
         }
       });
@@ -1544,7 +1680,7 @@ class CoSyncPlugin extends Plugin {
             }
           }
 
-          const initialText = isMarkdown ? injectCosyncId(fileContent, docId) : fileContent;
+          const initialText = isMarkdown ? stripCosyncId(fileContent) : fileContent;
           this.isApplyingRemoteUpdate = true;
           this.programmedModifications.add(filepath);
           try {
@@ -1621,25 +1757,7 @@ class CoSyncPlugin extends Plugin {
     }
   }
 
-  async activateView() {
-    const { workspace } = this.app;
-    
-    let leaf = workspace.getLeavesOfType(COSYNC_VIEW_TYPE)[0];
-    if (!leaf) {
-      const rightLeaf = workspace.getRightLeaf(false);
-      if (rightLeaf) {
-        leaf = rightLeaf;
-        await leaf.setViewState({
-          type: COSYNC_VIEW_TYPE,
-          active: true
-        });
-      }
-    }
-    
-    if (leaf) {
-      workspace.revealLeaf(leaf);
-    }
-  }
+
 }
 
 // Settings dashboard
@@ -1757,24 +1875,20 @@ class CoSyncSettingTab extends PluginSettingTab {
   }
 }
 
-function injectCosyncId(content: string, docId: string): string {
+function stripCosyncId(content: string): string {
   const cleanContent = content.replace(/^\uFEFF/, '');
   const frontmatterRegex = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
   const match = cleanContent.match(frontmatterRegex);
   
-  let body = cleanContent;
-  let otherFrontmatterLines: string[] = [];
-  
   if (match) {
     const innerContent = match[1];
     const lines = innerContent.split(/\r?\n/);
-    for (const line of lines) {
+    const otherFrontmatterLines = lines.filter(line => {
       const trimmed = line.trim();
-      if (trimmed && !trimmed.startsWith('cosyncId:')) {
-        otherFrontmatterLines.push(line);
-      }
-    }
-    body = cleanContent.replace(frontmatterRegex, '');
+      return trimmed && !trimmed.startsWith('cosyncId:');
+    });
+    
+    const body = cleanContent.replace(frontmatterRegex, '');
     
     if (otherFrontmatterLines.length > 0) {
       return `---\n${otherFrontmatterLines.join('\n')}\n---\n\n${body.trim()}`;
@@ -1782,25 +1896,34 @@ function injectCosyncId(content: string, docId: string): string {
       return body.trim();
     }
   } else {
-    return cleanContent.replace(/cosyncId:\s*[^\r\n]+/g, '').trim();
+    // Only strip if it is at the start of a line to avoid false positives inside user text
+    return cleanContent.replace(/^cosyncId:\s*[^\r\n]+(?:\r?\n|$)/gm, '').trim();
   }
 }
 
 function getContentHash(str: string): string {
-  let hash = 5381;
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash * 33) ^ str.charCodeAt(i);
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0, ch; i < str.length; i++) {
+    ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
   }
-  return (hash >>> 0).toString(36);
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
 }
 
 function getBinaryHash(buffer: ArrayBuffer): string {
   const view = new Uint8Array(buffer);
-  let hash = 5381;
-  for (let i = 0; i < view.length; i++) {
-    hash = (hash * 33) ^ view[i];
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0, val; i < view.length; i++) {
+    val = view[i];
+    h1 = Math.imul(h1 ^ val, 2654435761);
+    h2 = Math.imul(h2 ^ val, 1597334677);
   }
-  return (hash >>> 0).toString(36);
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
 }
 
 function updateYTextCleanly(ytext: Y.Text, newText: string) {
@@ -1891,128 +2014,6 @@ function applyDiff(ytext: Y.Text, baseText: string, newText: string) {
     }
     if (insertText.length > 0) {
       ytext.insert(commonPrefixLen, insertText);
-    }
-  }
-}
-
-const COSYNC_VIEW_TYPE = 'cosync-collaboration-view';
-
-class CoSyncView extends ItemView {
-  private plugin: CoSyncPlugin;
-
-  constructor(leaf: WorkspaceLeaf, plugin: CoSyncPlugin) {
-    super(leaf);
-    this.plugin = plugin;
-  }
-
-  getViewType(): string {
-    return COSYNC_VIEW_TYPE;
-  }
-
-  getDisplayText(): string {
-    return 'CoSync Collaboration';
-  }
-
-  getIcon(): string {
-    return 'users';
-  }
-
-  async onOpen() {
-    this.render();
-    this.registerEvent(
-      this.app.workspace.on('active-leaf-change', () => this.render())
-    );
-  }
-
-  async onClose() {
-    // Cleanup
-  }
-
-  public render() {
-    const container = this.contentEl;
-    container.empty();
-    container.addClass('cosync-sidebar-view');
-
-    // Header title
-    const header = container.createEl('div', { cls: 'cosync-sidebar-header' });
-    header.createEl('h3', { text: 'CoSync Collab' });
-
-    // Status pill
-    const status = this.plugin.getConnectionStatus();
-    const statusCard = container.createEl('div', { cls: 'cosync-status-card' });
-    const statusDot = statusCard.createEl('span', { cls: `cosync-status-dot status-${status}` });
-    const statusText = statusCard.createEl('span', { cls: 'cosync-status-text' });
-
-    if (status === 'connected') {
-      statusText.textContent = 'Connected';
-    } else if (status === 'connecting') {
-      statusText.textContent = 'Connecting...';
-    } else if (status === 'disconnected') {
-      statusText.textContent = 'Offline';
-    } else if (status === 'syncing') {
-      statusText.textContent = 'Syncing...';
-    }
-
-    // Active Note Info
-    const activeFile = this.plugin.getActiveFile();
-    const docSection = container.createEl('div', { cls: 'cosync-section' });
-    docSection.createEl('h4', { text: 'Active Note' });
-    const docInfo = docSection.createEl('div', { cls: 'cosync-doc-info' });
-
-    if (activeFile) {
-      const docTitle = docInfo.createEl('div', { cls: 'cosync-doc-title' });
-      docTitle.createEl('span', { text: '📄 ', cls: 'cosync-doc-icon' });
-      docTitle.createEl('span', { text: activeFile.basename, cls: 'cosync-doc-name' });
-    } else {
-      docInfo.createEl('div', { cls: 'cosync-doc-title empty', text: 'No note open' });
-    }
-
-    // Collaborators list
-    const collaboratorsSection = container.createEl('div', { cls: 'cosync-section' });
-    collaboratorsSection.createEl('h4', { text: 'Active Collaborators' });
-    const listEl = collaboratorsSection.createEl('div', { cls: 'cosync-collaborators-list' });
-
-    const collaborators = this.plugin.getCollaborators();
-    if (collaborators.length > 0) {
-      collaborators.forEach(user => {
-        const userRow = listEl.createEl('div', { cls: 'cosync-user-row' });
-        
-        const avatar = userRow.createEl('div', { cls: 'cosync-user-avatar' });
-        avatar.style.backgroundColor = user.color;
-        avatar.textContent = user.name.charAt(0).toUpperCase();
-
-        const nameSpan = userRow.createEl('span', { cls: 'cosync-user-name' });
-        nameSpan.textContent = user.name;
-
-        if (user.isSelf) {
-          userRow.createEl('span', { cls: 'cosync-self-badge', text: 'you' });
-        }
-      });
-    } else {
-      listEl.createEl('div', { cls: 'cosync-no-collaborators', text: 'No other collaborators' });
-    }
-
-    // Capture version button
-    if (activeFile && status === 'connected') {
-      const actionsSection = container.createEl('div', { cls: 'cosync-actions-section' });
-      const captureBtn = actionsSection.createEl('button', { cls: 'cosync-btn btn-primary', text: 'Capture Version' });
-      captureBtn.addEventListener('click', async () => {
-        try {
-          captureBtn.disabled = true;
-          captureBtn.textContent = 'Capturing...';
-          const version = await this.plugin.manualCaptureVersion();
-          if (version) {
-            new Notice(`Captured Version #${version.versionNumber} successfully!`);
-          } else {
-            new Notice('Failed to capture version.');
-          }
-        } catch (err) {
-          new Notice(`Error: ${(err as any).message || err}`);
-        } finally {
-          captureBtn.disabled = false;
-          captureBtn.textContent = 'Capture Version';
-        }
-      });
     }
   }
 }
