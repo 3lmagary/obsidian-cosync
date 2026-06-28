@@ -10420,6 +10420,9 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       this.app.workspace.on("active-leaf-change", () => this.handleFileSwitch())
     );
     this.registerEvent(
+      this.app.workspace.on("layout-change", () => this.bindYjsToEditor())
+    );
+    this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (file instanceof import_obsidian.TFile) {
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
@@ -10969,6 +10972,9 @@ ${localContent}
       }
     });
     this.bindYjsToEditor();
+    setTimeout(() => this.bindYjsToEditor(), 100);
+    setTimeout(() => this.bindYjsToEditor(), 500);
+    setTimeout(() => this.bindYjsToEditor(), 1500);
   }
   /**
    * Writes remote Yjs state changes back to the active vault file.
@@ -11135,6 +11141,82 @@ ${localContent}
         serverDocIdMap.set(d.id, d);
         serverDocTitleMap.set(d.title.trim().toLowerCase(), d);
       });
+      for (const [filePath, docId] of Object.entries(this.settings.fileMappings)) {
+        const isMarkdown = filePath.endsWith(".md") || filePath.endsWith(".txt");
+        if (isMarkdown && !localSyncableMap.has(filePath.toLowerCase())) {
+          console.log(`CoSync: Document "${filePath}" was deleted locally. Deleting on server...`);
+          try {
+            await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`, {
+              method: "DELETE",
+              headers: { "Authorization": `Bearer ${this.settings.token}` }
+            });
+          } catch (err) {
+            console.error(`CoSync: Failed to delete server document for "${filePath}":`, err);
+          }
+          delete this.settings.fileMappings[filePath];
+          delete this.settings.syncHashes[filePath];
+          delete this.settings.syncVersions[docId];
+        }
+      }
+      for (const [filePath, lastHash] of Object.entries(this.settings.syncHashes)) {
+        const isMarkdown = filePath.endsWith(".md") || filePath.endsWith(".txt") || filePath.startsWith("doc_") || filePath.startsWith("obs-");
+        if (!isMarkdown && !localBinaryMap.has(filePath.toLowerCase())) {
+          console.log(`CoSync: Attachment "${filePath}" was deleted locally. Deleting on server...`);
+          try {
+            await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments?filepath=${encodeURIComponent(filePath)}`, {
+              method: "DELETE",
+              headers: { "Authorization": `Bearer ${this.settings.token}` }
+            });
+          } catch (err) {
+            console.error(`CoSync: Failed to delete server attachment for "${filePath}":`, err);
+          }
+          delete this.settings.syncHashes[filePath];
+        }
+      }
+      const serverDocIds = new Set(serverDocs.map((d) => d.id));
+      const serverAttachPaths = new Set(serverAttachments.map((a) => a.filepath.toLowerCase()));
+      for (const [filePath, docId] of Object.entries(this.settings.fileMappings)) {
+        if (!serverDocIds.has(docId)) {
+          const localFile = localSyncableMap.get(filePath.toLowerCase());
+          if (localFile) {
+            console.log(`CoSync: Document "${filePath}" was deleted on server. Deleting locally...`);
+            this.isApplyingRemoteUpdate = true;
+            this.programmedModifications.add(filePath);
+            try {
+              await this.app.vault.delete(localFile);
+            } catch (err) {
+              this.programmedModifications.delete(filePath);
+              console.error(`CoSync: Failed to delete local file "${filePath}":`, err);
+            } finally {
+              this.isApplyingRemoteUpdate = false;
+            }
+          }
+          delete this.settings.fileMappings[filePath];
+          delete this.settings.syncHashes[filePath];
+          delete this.settings.syncVersions[docId];
+        }
+      }
+      for (const [filePath, lastHash] of Object.entries(this.settings.syncHashes)) {
+        const isMarkdown = filePath.endsWith(".md") || filePath.endsWith(".txt") || filePath.startsWith("doc_") || filePath.startsWith("obs-");
+        if (!isMarkdown && !serverAttachPaths.has(filePath.toLowerCase())) {
+          const localFile = localBinaryMap.get(filePath.toLowerCase());
+          if (localFile) {
+            console.log(`CoSync: Attachment "${filePath}" was deleted on server. Deleting locally...`);
+            this.isApplyingRemoteUpdate = true;
+            this.programmedModifications.add(filePath);
+            try {
+              await this.app.vault.delete(localFile);
+            } catch (err) {
+              this.programmedModifications.delete(filePath);
+              console.error(`CoSync: Failed to delete local attachment "${filePath}":`, err);
+            } finally {
+              this.isApplyingRemoteUpdate = false;
+            }
+          }
+          delete this.settings.syncHashes[filePath];
+        }
+      }
+      await this.saveSettings();
       for (const file of localSyncable) {
         const isMarkdown = file.extension.toLowerCase() === "md";
         const title = isMarkdown ? file.path.endsWith(".md") ? file.path.slice(0, -3) : file.path : file.path;
