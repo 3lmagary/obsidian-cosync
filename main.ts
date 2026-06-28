@@ -1078,6 +1078,20 @@ class CoSyncPlugin extends Plugin {
         if (!serverDocIds.has(docId)) {
           const localFile = localSyncableMap.get(filePath.toLowerCase());
           if (localFile) {
+            // Check if there are unsynced local changes
+            const localContent = await this.app.vault.read(localFile);
+            const localHash = getContentHash(localContent);
+            const lastSyncedHash = this.settings.syncHashes[filePath];
+            const localChanged = localHash !== lastSyncedHash;
+
+            if (localChanged) {
+              console.log(`CoSync: Document "${filePath}" was deleted on server but has local changes. Re-uploading...`);
+              delete this.settings.fileMappings[filePath];
+              delete this.settings.syncHashes[filePath];
+              delete this.settings.syncVersions[docId];
+              continue;
+            }
+
             console.log(`CoSync: Document "${filePath}" was deleted on server. Deleting locally...`);
             this.isApplyingRemoteUpdate = true;
             this.programmedModifications.add(filePath);
@@ -1101,6 +1115,17 @@ class CoSyncPlugin extends Plugin {
         if (!isMarkdown && !serverAttachPaths.has(filePath.toLowerCase())) {
           const localFile = localBinaryMap.get(filePath.toLowerCase());
           if (localFile) {
+            // Check if there are unsynced local changes
+            const localBuffer = await this.app.vault.readBinary(localFile);
+            const localHash = getBinaryHash(localBuffer);
+            const localChanged = localHash !== lastHash;
+
+            if (localChanged) {
+              console.log(`CoSync: Attachment "${filePath}" was deleted on server but has local changes. Re-uploading...`);
+              delete this.settings.syncHashes[filePath];
+              continue;
+            }
+
             console.log(`CoSync: Attachment "${filePath}" was deleted on server. Deleting locally...`);
             this.isApplyingRemoteUpdate = true;
             this.programmedModifications.add(filePath);
