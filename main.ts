@@ -29,7 +29,7 @@ const DEFAULT_SETTINGS: CoSyncSettings = {
   fileMappings: {},
   displayName: 'Obsidian User',
   showManualSettings: false,
-  syncInterval: 30,
+  syncInterval: 10,
   enableBackgroundSync: true
 };
 
