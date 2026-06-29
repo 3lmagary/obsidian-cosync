@@ -10344,7 +10344,8 @@ var DEFAULT_SETTINGS = {
   displayName: "User",
   showManualSettings: false,
   syncInterval: 10,
-  enableBackgroundSync: true
+  enableBackgroundSync: true,
+  syncConfig: false
 };
 var SYNCABLE_EXTENSIONS = /* @__PURE__ */ new Set(["md", "txt"]);
 function getDeterministicColor(name) {
@@ -10379,6 +10380,9 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.currentStatus = "disconnected";
     this.isSyncing = false;
     this.boundEditorView = null;
+    // Global Workspace WebSocket notifications connection
+    this.globalWs = null;
+    this.globalWsReconnectTimeout = null;
     this.recentLogs = [];
   }
   logEvent(level, message) {
@@ -10432,6 +10436,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
   async onload() {
     this.logEvent("info", "Loading Obsidian CoSync Plugin...");
     await this.loadSettings();
+    this.connectGlobalWebSocket();
     this.addSettingTab(new CoSyncSettingTab(this.app, this));
     this.registerView(
       COSYNC_VIEW_TYPE,
@@ -10456,6 +10461,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
+        if (file.path.startsWith(".")) return;
         if (file instanceof import_obsidian.TFile) {
           if (file.path === "cosync-sync-log.md") return;
           if (this.isApplyingRemoteUpdate) return;
@@ -10478,6 +10484,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("create", (file) => {
+        if (file.path.startsWith(".")) return;
         if (file.path === "cosync-sync-log.md") return;
         if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
@@ -10491,6 +10498,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
+        if (file.path.startsWith(".")) return;
         if (file.path === "cosync-sync-log.md") return;
         if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
@@ -10528,6 +10536,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
   }
   onunload() {
     console.log("Unloading CoSync Plugin...");
+    this.disconnectGlobalWebSocket();
     this.disconnectActive();
     if (this.statusBarEl) {
       this.statusBarEl.remove();
@@ -10541,6 +10550,119 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
   /**
    * Shuts down previous WebSocket links and releases Y.Doc allocations.
    */
+  // Global Workspace WebSocket notifications connection helper functions
+  connectGlobalWebSocket() {
+    if (this.globalWs) {
+      try {
+        this.globalWs.close();
+      } catch (e) {
+      }
+      this.globalWs = null;
+    }
+    if (this.globalWsReconnectTimeout) {
+      clearTimeout(this.globalWsReconnectTimeout);
+      this.globalWsReconnectTimeout = null;
+    }
+    if (!this.settings.serverUrl || !this.settings.token) {
+      return;
+    }
+    const workspaceId = this.settings.workspaceId || "default-workspace";
+    const wsUrl = this.settings.serverUrl.replace(/^http/, "ws") + `/workspace/${workspaceId}/global`;
+    this.logEvent("info", `Connecting to global sync notification channel...`);
+    try {
+      this.globalWs = new WebSocket(wsUrl, ["co-sync-auth", this.settings.token]);
+      this.globalWs.onmessage = (event) => {
+        if (event.data === "sync") {
+          this.logEvent("info", "Received global sync trigger. Syncing...");
+          if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+          this.instantSyncTimeout = setTimeout(() => {
+            if (!this.isSyncing) {
+              this.syncVault();
+            }
+          }, 500);
+        }
+      };
+      this.globalWs.onclose = () => {
+        if (this.globalWs) {
+          this.globalWsReconnectTimeout = setTimeout(() => this.connectGlobalWebSocket(), 5e3);
+        }
+      };
+      this.globalWs.onerror = (err) => {
+        console.warn("CoSync: Global notification WebSocket error:", err);
+      };
+    } catch (e) {
+      console.warn("CoSync: Failed to establish global notification socket:", e);
+    }
+  }
+  disconnectGlobalWebSocket() {
+    if (this.globalWsReconnectTimeout) {
+      clearTimeout(this.globalWsReconnectTimeout);
+      this.globalWsReconnectTimeout = null;
+    }
+    if (this.globalWs) {
+      const ws = this.globalWs;
+      this.globalWs = null;
+      try {
+        ws.close();
+      } catch (e) {
+      }
+    }
+  }
+  async readLocalBinary(filePath) {
+    if (filePath.startsWith(".")) {
+      return await this.app.vault.adapter.readBinary(filePath);
+    } else {
+      const file = this.app.vault.getAbstractFileByPath(filePath);
+      if (file instanceof import_obsidian.TFile) {
+        return await this.app.vault.readBinary(file);
+      }
+      throw new Error(`File not found: ${filePath}`);
+    }
+  }
+  async writeLocalBinary(filePath, data) {
+    if (filePath.startsWith(".")) {
+      const parts = filePath.split("/");
+      if (parts.length > 1) {
+        let current = "";
+        for (let i = 0; i < parts.length - 1; i++) {
+          current = current ? `${current}/${parts[i]}` : parts[i];
+          if (!await this.app.vault.adapter.exists(current)) {
+            await this.app.vault.adapter.mkdir(current);
+          }
+        }
+      }
+      await this.app.vault.adapter.writeBinary(filePath, data);
+    } else {
+      const file = this.app.vault.getAbstractFileByPath(filePath);
+      if (file instanceof import_obsidian.TFile) {
+        await this.app.vault.modifyBinary(file, data);
+      } else {
+        const parts = filePath.split("/");
+        if (parts.length > 1) {
+          let current = "";
+          for (let i = 0; i < parts.length - 1; i++) {
+            current = current ? `${current}/${parts[i]}` : parts[i];
+            if (!this.app.vault.getAbstractFileByPath(current)) {
+              await this.app.vault.createFolder(current);
+            }
+          }
+        }
+        await this.app.vault.createBinary(filePath, data);
+      }
+    }
+  }
+  async deleteLocalFile(filePath, localFile) {
+    if (filePath.startsWith(".")) {
+      if (await this.app.vault.adapter.exists(filePath)) {
+        await this.app.vault.adapter.remove(filePath);
+      }
+    } else {
+      const fileToDel = localFile || this.app.vault.getAbstractFileByPath(filePath);
+      if (fileToDel instanceof import_obsidian.TFile) {
+        await this.app.vault.delete(fileToDel);
+      }
+    }
+  }
   async disconnectActive() {
     if (this.syncTimeout) {
       clearTimeout(this.syncTimeout);
@@ -11149,6 +11271,7 @@ ${localContent}
       }
     }
     await this.saveData(this.settings);
+    this.connectGlobalWebSocket();
   }
   /**
    * Saves settings AND reconnects the active file. Only call this when
@@ -11196,6 +11319,38 @@ ${localContent}
         if (pathLower.endsWith(".excalidraw.md")) return true;
         return !SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
       });
+      if (this.settings.syncConfig) {
+        const targetConfigs = [
+          ".obsidian/appearance.json",
+          ".obsidian/hotkeys.json",
+          ".obsidian/core-plugins.json",
+          ".obsidian/community-plugins.json"
+        ];
+        try {
+          if (await this.app.vault.adapter.exists(".obsidian/snippets")) {
+            const list = await this.app.vault.adapter.list(".obsidian/snippets");
+            if (list && list.files) {
+              for (const file of list.files) {
+                if (file.endsWith(".css")) {
+                  targetConfigs.push(file);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("CoSync: Error listing CSS snippets:", e);
+        }
+        for (const configPath of targetConfigs) {
+          if (await this.app.vault.adapter.exists(configPath)) {
+            localBinary.push({
+              path: configPath,
+              name: configPath.split("/").pop() || "",
+              extension: configPath.split(".").pop() || "",
+              vault: this.app.vault
+            });
+          }
+        }
+      }
       const localSyncableMap = new Map(localSyncable.map((f) => [f.path.toLowerCase(), f]));
       const localBinaryMap = new Map(localBinary.map((f) => [f.path.toLowerCase(), f]));
       const serverDocIdMap = /* @__PURE__ */ new Map();
@@ -11306,7 +11461,7 @@ ${localContent}
         if (!isMarkdown && !serverAttachPaths.has(filePath.toLowerCase())) {
           const localFile = localBinaryMap.get(filePath.toLowerCase());
           if (localFile) {
-            const localBuffer = await this.app.vault.readBinary(localFile);
+            const localBuffer = await this.readLocalBinary(filePath);
             const localHash = getBinaryHash(localBuffer);
             const localChanged = localHash !== lastHash;
             if (localChanged) {
@@ -11318,7 +11473,7 @@ ${localContent}
             this.isApplyingRemoteUpdate = true;
             this.programmedModifications.add(filePath);
             try {
-              await this.app.vault.delete(localFile);
+              await this.deleteLocalFile(filePath, localFile);
               deletedCount++;
               this.logEvent("info", `Deleted local attachment "${filePath}" (synced server deletion)`);
             } catch (err) {
@@ -11465,7 +11620,7 @@ ${localContent}
       }
       for (const file of localBinary) {
         try {
-          const localBuffer = await this.app.vault.readBinary(file);
+          const localBuffer = await this.readLocalBinary(file.path);
           const localHash = getBinaryHash(localBuffer);
           const lastSyncedHash = this.settings.syncHashes[file.path];
           const serverAttach = serverAttachMap.get(file.path.toLowerCase());
@@ -11526,13 +11681,8 @@ ${localContent}
               this.isApplyingRemoteUpdate = true;
               this.programmedModifications.add(attach.filepath);
               try {
-                if (localFile) {
-                  await this.app.vault.modifyBinary(localFile, arrayBuffer);
-                  this.logEvent("success", `Downloaded modified attachment "${attach.filepath}"`);
-                } else {
-                  await this.app.vault.createBinary(attach.filepath, arrayBuffer);
-                  this.logEvent("success", `Downloaded missing attachment "${attach.filepath}"`);
-                }
+                await this.writeLocalBinary(attach.filepath, arrayBuffer);
+                this.logEvent("success", `Downloaded ${localFile ? "modified" : "missing"} attachment "${attach.filepath}"`);
                 this.settings.syncHashes[attach.filepath] = attach.hash;
                 downloadedCount++;
               } catch (e) {
@@ -11953,6 +12103,11 @@ var CoSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
         this.plugin.startPeriodicSync();
       }
+    }));
+    containerEl.createEl("h3", { text: "Vault Customization & Configuration" });
+    new import_obsidian.Setting(containerEl).setName("Sync Obsidian Configuration").setDesc("Synchronize appearance settings, themes, custom hotkeys, and active plugins list across devices.").addToggle((toggle) => toggle.setValue(this.plugin.settings.syncConfig || false).onChange(async (value) => {
+      this.plugin.settings.syncConfig = value;
+      await this.plugin.saveSettings();
     }));
     containerEl.createEl("h3", { text: "Vault Synchronization" });
     new import_obsidian.Setting(containerEl).setName("Sync Local Vault Now").setDesc("Force a full synchronization check immediately.").addButton((btn) => btn.setButtonText("Sync Entire Vault Now").setCta().onClick(async () => {

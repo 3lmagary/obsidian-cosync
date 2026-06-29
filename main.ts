@@ -17,6 +17,7 @@ interface CoSyncSettings {
   showManualSettings: boolean;
   syncInterval: number;
   enableBackgroundSync: boolean;
+  syncConfig: boolean;
 }
 
 const DEFAULT_SETTINGS: CoSyncSettings = {
@@ -30,7 +31,8 @@ const DEFAULT_SETTINGS: CoSyncSettings = {
   displayName: 'User',
   showManualSettings: false,
   syncInterval: 10,
-  enableBackgroundSync: true
+  enableBackgroundSync: true,
+  syncConfig: false
 };
 
 const SYNCABLE_EXTENSIONS = new Set(['md', 'txt']);
@@ -72,6 +74,10 @@ class CoSyncPlugin extends Plugin {
   private currentStatus: 'connected' | 'connecting' | 'disconnected' | 'syncing' = 'disconnected';
   private isSyncing = false;
   private boundEditorView: EditorView | null = null;
+
+  // Global Workspace WebSocket notifications connection
+  private globalWs: WebSocket | null = null;
+  private globalWsReconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
   public recentLogs: Array<{ timestamp: string; level: 'info' | 'success' | 'warn' | 'error'; message: string }> = [];
 
@@ -137,6 +143,7 @@ class CoSyncPlugin extends Plugin {
   async onload() {
     this.logEvent('info', 'Loading Obsidian CoSync Plugin...');
     await this.loadSettings();
+    this.connectGlobalWebSocket();
 
     // Register setting tab
     this.addSettingTab(new CoSyncSettingTab(this.app, this));
@@ -182,6 +189,7 @@ class CoSyncPlugin extends Plugin {
     // Monitor file modifications to trigger instant sync
     this.registerEvent(
       this.app.vault.on('modify', (file) => {
+        if (file.path.startsWith('.')) return;
         if (file instanceof TFile) {
           if (file.path === 'cosync-sync-log.md') return;
           if (this.isApplyingRemoteUpdate) return;
@@ -210,6 +218,7 @@ class CoSyncPlugin extends Plugin {
     // Monitor file creations to trigger instant sync
     this.registerEvent(
       this.app.vault.on('create', (file) => {
+        if (file.path.startsWith('.')) return;
         if (file.path === 'cosync-sync-log.md') return;
         if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
@@ -225,6 +234,7 @@ class CoSyncPlugin extends Plugin {
     // Monitor file deletions to trigger instant sync
     this.registerEvent(
       this.app.vault.on('delete', (file) => {
+        if (file.path.startsWith('.')) return;
         if (file.path === 'cosync-sync-log.md') return;
         if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
@@ -271,6 +281,7 @@ class CoSyncPlugin extends Plugin {
 
   onunload() {
     console.log('Unloading CoSync Plugin...');
+    this.disconnectGlobalWebSocket();
     this.disconnectActive();
     if (this.statusBarEl) {
       this.statusBarEl.remove();
@@ -285,6 +296,126 @@ class CoSyncPlugin extends Plugin {
   /**
    * Shuts down previous WebSocket links and releases Y.Doc allocations.
    */
+  // Global Workspace WebSocket notifications connection helper functions
+  public connectGlobalWebSocket() {
+    if (this.globalWs) {
+      try { this.globalWs.close(); } catch (e) {}
+      this.globalWs = null;
+    }
+    if (this.globalWsReconnectTimeout) {
+      clearTimeout(this.globalWsReconnectTimeout);
+      this.globalWsReconnectTimeout = null;
+    }
+
+    if (!this.settings.serverUrl || !this.settings.token) {
+      return;
+    }
+
+    const workspaceId = this.settings.workspaceId || 'default-workspace';
+    const wsUrl = this.settings.serverUrl.replace(/^http/, 'ws') + `/workspace/${workspaceId}/global`;
+    this.logEvent('info', `Connecting to global sync notification channel...`);
+    
+    try {
+      this.globalWs = new WebSocket(wsUrl, ['co-sync-auth', this.settings.token]);
+
+      this.globalWs.onmessage = (event) => {
+        if (event.data === 'sync') {
+          this.logEvent('info', 'Received global sync trigger. Syncing...');
+          if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+          this.instantSyncTimeout = setTimeout(() => {
+            if (!this.isSyncing) {
+              this.syncVault();
+            }
+          }, 500);
+        }
+      };
+
+      this.globalWs.onclose = () => {
+        if (this.globalWs) { // only reconnect if not intentionally disconnected
+          this.globalWsReconnectTimeout = setTimeout(() => this.connectGlobalWebSocket(), 5000);
+        }
+      };
+
+      this.globalWs.onerror = (err) => {
+        console.warn('CoSync: Global notification WebSocket error:', err);
+      };
+    } catch (e) {
+      console.warn('CoSync: Failed to establish global notification socket:', e);
+    }
+  }
+
+  public disconnectGlobalWebSocket() {
+    if (this.globalWsReconnectTimeout) {
+      clearTimeout(this.globalWsReconnectTimeout);
+      this.globalWsReconnectTimeout = null;
+    }
+    if (this.globalWs) {
+      const ws = this.globalWs;
+      this.globalWs = null; // prevent reconnect loop on close
+      try { ws.close(); } catch (e) {}
+    }
+  }
+
+  private async readLocalBinary(filePath: string): Promise<ArrayBuffer> {
+    if (filePath.startsWith('.')) {
+      return await this.app.vault.adapter.readBinary(filePath);
+    } else {
+      const file = this.app.vault.getAbstractFileByPath(filePath);
+      if (file instanceof TFile) {
+        return await this.app.vault.readBinary(file);
+      }
+      throw new Error(`File not found: ${filePath}`);
+    }
+  }
+
+  private async writeLocalBinary(filePath: string, data: ArrayBuffer): Promise<void> {
+    if (filePath.startsWith('.')) {
+      // Ensure parent folders exist
+      const parts = filePath.split('/');
+      if (parts.length > 1) {
+        let current = '';
+        for (let i = 0; i < parts.length - 1; i++) {
+          current = current ? `${current}/${parts[i]}` : parts[i];
+          if (!(await this.app.vault.adapter.exists(current))) {
+            await this.app.vault.adapter.mkdir(current);
+          }
+        }
+      }
+      await this.app.vault.adapter.writeBinary(filePath, data);
+    } else {
+      const file = this.app.vault.getAbstractFileByPath(filePath);
+      if (file instanceof TFile) {
+        await this.app.vault.modifyBinary(file, data);
+      } else {
+        // Ensure parent folders exist
+        const parts = filePath.split('/');
+        if (parts.length > 1) {
+          let current = '';
+          for (let i = 0; i < parts.length - 1; i++) {
+            current = current ? `${current}/${parts[i]}` : parts[i];
+            if (!this.app.vault.getAbstractFileByPath(current)) {
+              await this.app.vault.createFolder(current);
+            }
+          }
+        }
+        await this.app.vault.createBinary(filePath, data);
+      }
+    }
+  }
+
+  private async deleteLocalFile(filePath: string, localFile?: TFile): Promise<void> {
+    if (filePath.startsWith('.')) {
+      if (await this.app.vault.adapter.exists(filePath)) {
+        await this.app.vault.adapter.remove(filePath);
+      }
+    } else {
+      const fileToDel = localFile || this.app.vault.getAbstractFileByPath(filePath);
+      if (fileToDel instanceof TFile) {
+        await this.app.vault.delete(fileToDel);
+      }
+    }
+  }
+
   private async disconnectActive() {
     if (this.syncTimeout) {
       clearTimeout(this.syncTimeout);
@@ -1047,6 +1178,7 @@ class CoSyncPlugin extends Plugin {
     }
 
     await this.saveData(this.settings);
+    this.connectGlobalWebSocket();
   }
 
   /**
@@ -1105,6 +1237,43 @@ class CoSyncPlugin extends Plugin {
         if (pathLower.endsWith('.excalidraw.md')) return true;
         return !SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
       });
+
+      // If configuration sync is enabled, append target hidden files!
+      if (this.settings.syncConfig) {
+        const targetConfigs = [
+          '.obsidian/appearance.json',
+          '.obsidian/hotkeys.json',
+          '.obsidian/core-plugins.json',
+          '.obsidian/community-plugins.json'
+        ];
+        
+        try {
+          if (await this.app.vault.adapter.exists('.obsidian/snippets')) {
+            const list = await this.app.vault.adapter.list('.obsidian/snippets');
+            if (list && list.files) {
+              for (const file of list.files) {
+                if (file.endsWith('.css')) {
+                  targetConfigs.push(file);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('CoSync: Error listing CSS snippets:', e);
+        }
+
+        for (const configPath of targetConfigs) {
+          if (await this.app.vault.adapter.exists(configPath)) {
+            // We push a mock TFile-like object into localBinary so the rest of the binary sync loop treats it perfectly!
+            localBinary.push({
+              path: configPath,
+              name: configPath.split('/').pop() || '',
+              extension: configPath.split('.').pop() || '',
+              vault: this.app.vault
+            } as any);
+          }
+        }
+      }
 
       const localSyncableMap = new Map(localSyncable.map(f => [f.path.toLowerCase(), f]));
       const localBinaryMap = new Map(localBinary.map(f => [f.path.toLowerCase(), f]));
@@ -1233,7 +1402,7 @@ class CoSyncPlugin extends Plugin {
           const localFile = localBinaryMap.get(filePath.toLowerCase());
           if (localFile) {
             // Check if there are unsynced local changes
-            const localBuffer = await this.app.vault.readBinary(localFile);
+            const localBuffer = await this.readLocalBinary(filePath);
             const localHash = getBinaryHash(localBuffer);
             const localChanged = localHash !== lastHash;
 
@@ -1247,7 +1416,7 @@ class CoSyncPlugin extends Plugin {
             this.isApplyingRemoteUpdate = true;
             this.programmedModifications.add(filePath);
             try {
-              await this.app.vault.delete(localFile);
+              await this.deleteLocalFile(filePath, localFile);
               deletedCount++;
               this.logEvent('info', `Deleted local attachment "${filePath}" (synced server deletion)`);
             } catch (err: any) {
@@ -1430,7 +1599,7 @@ class CoSyncPlugin extends Plugin {
       // Upload missing/modified attachments
       for (const file of localBinary) {
         try {
-          const localBuffer = await this.app.vault.readBinary(file);
+          const localBuffer = await this.readLocalBinary(file.path);
           const localHash = getBinaryHash(localBuffer);
           const lastSyncedHash = this.settings.syncHashes[file.path];
 
@@ -1500,13 +1669,8 @@ class CoSyncPlugin extends Plugin {
               this.isApplyingRemoteUpdate = true;
               this.programmedModifications.add(attach.filepath);
               try {
-                if (localFile) {
-                  await this.app.vault.modifyBinary(localFile, arrayBuffer);
-                  this.logEvent('success', `Downloaded modified attachment "${attach.filepath}"`);
-                } else {
-                  await this.app.vault.createBinary(attach.filepath, arrayBuffer);
-                  this.logEvent('success', `Downloaded missing attachment "${attach.filepath}"`);
-                }
+                await this.writeLocalBinary(attach.filepath, arrayBuffer);
+                this.logEvent('success', `Downloaded ${localFile ? 'modified' : 'missing'} attachment "${attach.filepath}"`);
                 this.settings.syncHashes[attach.filepath] = attach.hash;
                 downloadedCount++;
               } catch (e: any) {
@@ -1997,6 +2161,18 @@ class CoSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
             this.plugin.startPeriodicSync();
           }
+        }));
+
+    containerEl.createEl('h3', { text: 'Vault Customization & Configuration' });
+
+    new Setting(containerEl)
+      .setName('Sync Obsidian Configuration')
+      .setDesc('Synchronize appearance settings, themes, custom hotkeys, and active plugins list across devices.')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.syncConfig || false)
+        .onChange(async (value) => {
+          this.plugin.settings.syncConfig = value;
+          await this.plugin.saveSettings();
         }));
 
     containerEl.createEl('h3', { text: 'Vault Synchronization' });
