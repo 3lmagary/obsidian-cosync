@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, TFile, PluginSettingTab, App, Setting, Notice } from 'obsidian';
+import { Plugin, MarkdownView, TFile, PluginSettingTab, App, Setting, Notice, ItemView, WorkspaceLeaf } from 'obsidian';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { yCollab } from 'y-codemirror.next';
@@ -73,6 +73,25 @@ class CoSyncPlugin extends Plugin {
   private isSyncing = false;
   private boundEditorView: EditorView | null = null;
 
+  public recentLogs: Array<{ timestamp: string; level: 'info' | 'success' | 'warn' | 'error'; message: string }> = [];
+
+  public logEvent(level: 'info' | 'success' | 'warn' | 'error', message: string) {
+    const timestamp = new Date().toLocaleTimeString();
+    this.recentLogs.unshift({ timestamp, level, message });
+    if (this.recentLogs.length > 50) {
+      this.recentLogs.pop();
+    }
+    console.log(`CoSync [${level.toUpperCase()}]: ${message}`);
+    
+    // Update open sidebar views
+    const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
+    leaves.forEach(leaf => {
+      if (leaf.view instanceof CoSyncView) {
+        leaf.view.render();
+      }
+    });
+  }
+
   private updateStatusBar(status: 'connected' | 'connecting' | 'disconnected' | 'syncing', customText?: string) {
     this.currentStatus = status;
     if (!this.statusBarEl) return;
@@ -86,6 +105,7 @@ class CoSyncPlugin extends Plugin {
     container.style.cursor = 'pointer';
     container.title = 'Obsidian CoSync Status';
     container.addEventListener('click', () => {
+      this.activateView();
       this.syncEntireVault();
     });
     
@@ -104,14 +124,40 @@ class CoSyncPlugin extends Plugin {
     } else if (status === 'syncing') {
       text.textContent = customText || 'CoSync: Syncing...';
     }
+
+    // Refresh any open sidebar views
+    const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
+    leaves.forEach(leaf => {
+      if (leaf.view instanceof CoSyncView) {
+        leaf.view.render();
+      }
+    });
   }
 
   async onload() {
-    console.log('Loading Obsidian CoSync Plugin...');
+    this.logEvent('info', 'Loading Obsidian CoSync Plugin...');
     await this.loadSettings();
 
     // Register setting tab
     this.addSettingTab(new CoSyncSettingTab(this.app, this));
+
+    // Register sidebar view
+    this.registerView(
+      COSYNC_VIEW_TYPE,
+      (leaf) => new CoSyncView(leaf, this)
+    );
+
+    // Add ribbon icon to open/reveal sidebar
+    this.addRibbonIcon('users', 'CoSync Collaboration', () => {
+      this.activateView();
+    });
+
+    // Add command to show sidebar
+    this.addCommand({
+      id: 'show-cosync-sidebar',
+      name: 'Show Collaboration Sidebar',
+      callback: () => this.activateView()
+    });
 
 
 
@@ -610,7 +656,7 @@ class CoSyncPlugin extends Plugin {
    */
   private async handleFileSwitch(force = false) {
     const file = this.app.workspace.getActiveFile();
-    if (!file || !SYNCABLE_EXTENSIONS.has(file.extension.toLowerCase())) {
+    if (!file || !SYNCABLE_EXTENSIONS.has(file.extension.toLowerCase()) || file.path.toLowerCase().endsWith('.excalidraw.md')) {
       this.disconnectActive();
       return;
     }
@@ -1013,7 +1059,7 @@ class CoSyncPlugin extends Plugin {
     if (!this.settings.token || !this.settings.workspaceId) return;
 
     this.isSyncing = true;
-    console.log('CoSync: Starting background synchronization...');
+    this.logEvent('info', 'Starting vault synchronization...');
     this.updateStatusBar('syncing');
 
     let uploadedCount = 0;
@@ -1041,8 +1087,16 @@ class CoSyncPlugin extends Plugin {
 
       // 3. Scan local files
       const localFiles = this.app.vault.getFiles();
-      const localSyncable = localFiles.filter(f => SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase()));
-      const localBinary = localFiles.filter(f => !SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase()));
+      const localSyncable = localFiles.filter(f => {
+        const pathLower = f.path.toLowerCase();
+        if (pathLower.endsWith('.excalidraw.md')) return false;
+        return SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
+      });
+      const localBinary = localFiles.filter(f => {
+        const pathLower = f.path.toLowerCase();
+        if (pathLower.endsWith('.excalidraw.md')) return true;
+        return !SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
+      });
 
       const localSyncableMap = new Map(localSyncable.map(f => [f.path.toLowerCase(), f]));
       const localBinaryMap = new Map(localBinary.map(f => [f.path.toLowerCase(), f]));
@@ -1081,10 +1135,13 @@ class CoSyncPlugin extends Plugin {
             });
             if (res.ok) {
               deletedCount++;
+              this.logEvent('success', `Deleted server document for note "${filePath}"`);
             } else {
+              this.logEvent('error', `Failed to delete server document for "${filePath}": HTTP ${res.status}`);
               errors.push(`Failed to delete server document for "${filePath}": HTTP ${res.status}`);
             }
           } catch (err: any) {
+            this.logEvent('error', `Failed to delete server document for "${filePath}": ${err.message || err}`);
             errors.push(`Failed to delete server document for "${filePath}": ${err.message || err}`);
           }
           delete this.settings.fileMappings[filePath];
@@ -1104,10 +1161,13 @@ class CoSyncPlugin extends Plugin {
             });
             if (res.ok) {
               deletedCount++;
+              this.logEvent('success', `Deleted server attachment "${filePath}"`);
             } else {
+              this.logEvent('error', `Failed to delete server attachment for "${filePath}": HTTP ${res.status}`);
               errors.push(`Failed to delete server attachment for "${filePath}": HTTP ${res.status}`);
             }
           } catch (err: any) {
+            this.logEvent('error', `Failed to delete server attachment for "${filePath}": ${err.message || err}`);
             errors.push(`Failed to delete server attachment for "${filePath}": ${err.message || err}`);
           }
           delete this.settings.syncHashes[filePath];
@@ -1129,7 +1189,7 @@ class CoSyncPlugin extends Plugin {
             const localChanged = localHash !== lastSyncedHash;
 
             if (localChanged) {
-              console.log(`CoSync: Document "${filePath}" was deleted on server but has local changes. Re-uploading...`);
+              this.logEvent('warn', `Document "${filePath}" was deleted on server but has local changes. Re-uploading...`);
               delete this.settings.fileMappings[filePath];
               delete this.settings.syncHashes[docId];
               delete this.settings.syncVersions[docId];
@@ -1142,8 +1202,10 @@ class CoSyncPlugin extends Plugin {
             try {
               await this.app.vault.delete(localFile);
               deletedCount++;
+              this.logEvent('info', `Deleted local note "${filePath}" (synced server deletion)`);
             } catch (err: any) {
               this.programmedModifications.delete(filePath);
+              this.logEvent('error', `Failed to delete local document "${filePath}": ${err.message || err}`);
               errors.push(`Failed to delete local document "${filePath}": ${err.message || err}`);
             } finally {
               this.isApplyingRemoteUpdate = false;
@@ -1166,7 +1228,7 @@ class CoSyncPlugin extends Plugin {
             const localChanged = localHash !== lastHash;
 
             if (localChanged) {
-              console.log(`CoSync: Attachment "${filePath}" was deleted on server but has local changes. Re-uploading...`);
+              this.logEvent('warn', `Attachment "${filePath}" was deleted on server but has local changes. Re-uploading...`);
               delete this.settings.syncHashes[filePath];
               continue;
             }
@@ -1177,8 +1239,10 @@ class CoSyncPlugin extends Plugin {
             try {
               await this.app.vault.delete(localFile);
               deletedCount++;
+              this.logEvent('info', `Deleted local attachment "${filePath}" (synced server deletion)`);
             } catch (err: any) {
               this.programmedModifications.delete(filePath);
+              this.logEvent('error', `Failed to delete local attachment "${filePath}": ${err.message || err}`);
               errors.push(`Failed to delete local attachment "${filePath}": ${err.message || err}`);
             } finally {
               this.isApplyingRemoteUpdate = false;
@@ -1239,14 +1303,18 @@ class CoSyncPlugin extends Plugin {
               const outcome = await this.reconcileBackgroundDoc(file, docId, isMarkdown, localContent, localHash, lastSyncedHash, serverVersion);
               if (outcome === 'uploaded') {
                 uploadedCount++;
+                this.logEvent('success', `Uploaded modifications for note "${file.path}"`);
               } else if (outcome === 'downloaded') {
                 downloadedCount++;
+                this.logEvent('success', `Downloaded modifications for note "${file.path}"`);
               } else if (outcome === 'merged') {
                 uploadedCount++;
                 downloadedCount++;
                 reconciledCount++;
+                this.logEvent('success', `Merged conflicts for note "${file.path}"`);
               }
             } catch (err: any) {
+              this.logEvent('error', `Failed to sync document "${file.path}": ${err.message || err}`);
               errors.push(`Failed to sync document "${file.path}": ${err.message || err}`);
             }
           }
@@ -1269,6 +1337,7 @@ class CoSyncPlugin extends Plugin {
               const newDocId = newDoc.id;
               this.serverDocsCache = null; // Invalidate cache
               this.settings.fileMappings[file.path] = newDocId;
+              this.logEvent('success', `Uploaded new note "${file.path}"`);
 
               const contentWithId = isMarkdown ? stripCosyncId(fileContent) : fileContent;
               if (isMarkdown && contentWithId !== fileContent) {
@@ -1287,9 +1356,11 @@ class CoSyncPlugin extends Plugin {
               this.settings.syncVersions[newDocId] = 0; // Will update on next fetch
               uploadedCount++;
             } else {
+              this.logEvent('error', `Failed to upload local document "${file.path}": HTTP ${createResponse.status}`);
               errors.push(`Failed to upload local document "${file.path}": HTTP ${createResponse.status}`);
             }
           } catch (err: any) {
+            this.logEvent('error', `Failed to upload local document "${file.path}": ${err.message || err}`);
             errors.push(`Failed to upload local document "${file.path}": ${err.message || err}`);
           }
         }
@@ -1332,7 +1403,9 @@ class CoSyncPlugin extends Plugin {
             try {
               await this.downloadNewDocFromServer(doc.id, expectedPath, isMarkdown);
               downloadedCount++;
+              this.logEvent('success', `Downloaded missing note "${expectedPath}"`);
             } catch (err: any) {
+              this.logEvent('error', `Failed to download server document "${doc.title}": ${err.message || err}`);
               errors.push(`Failed to download server document "${doc.title}": ${err.message || err}`);
             }
           } else {
@@ -1369,11 +1442,14 @@ class CoSyncPlugin extends Plugin {
             if (uploadRes.ok) {
               this.settings.syncHashes[file.path] = localHash;
               uploadedCount++;
+              this.logEvent('success', `Uploaded attachment "${file.path}"`);
             } else {
+              this.logEvent('error', `Failed to upload attachment "${file.path}": HTTP ${uploadRes.status}`);
               errors.push(`Failed to upload attachment "${file.path}": HTTP ${uploadRes.status}`);
             }
           }
         } catch (err: any) {
+          this.logEvent('error', `Failed to upload attachment "${file.path}": ${err.message || err}`);
           errors.push(`Failed to upload attachment "${file.path}": ${err.message || err}`);
         }
       }
@@ -1416,22 +1492,27 @@ class CoSyncPlugin extends Plugin {
               try {
                 if (localFile) {
                   await this.app.vault.modifyBinary(localFile, arrayBuffer);
+                  this.logEvent('success', `Downloaded modified attachment "${attach.filepath}"`);
                 } else {
                   await this.app.vault.createBinary(attach.filepath, arrayBuffer);
+                  this.logEvent('success', `Downloaded missing attachment "${attach.filepath}"`);
                 }
                 this.settings.syncHashes[attach.filepath] = attach.hash;
                 downloadedCount++;
               } catch (e: any) {
                 this.programmedModifications.delete(attach.filepath);
+                this.logEvent('error', `Failed to write binary file "${attach.filepath}": ${e.message || e}`);
                 errors.push(`Failed to write binary file "${attach.filepath}": ${e.message || e}`);
               } finally {
                 this.isApplyingRemoteUpdate = false;
               }
             } else {
+              this.logEvent('error', `Failed to download attachment "${attach.filepath}": HTTP ${downloadRes.status}`);
               errors.push(`Failed to download attachment "${attach.filepath}": HTTP ${downloadRes.status}`);
             }
           }
         } catch (err: any) {
+          this.logEvent('error', `Failed to download attachment "${attach.filepath}": ${err.message || err}`);
           errors.push(`Failed to download attachment "${attach.filepath}": ${err.message || err}`);
         }
       }
@@ -1452,6 +1533,14 @@ class CoSyncPlugin extends Plugin {
           logEntry += `  - \`${err}\`\n`;
         });
       }
+      
+      // Append detailed logs of events
+      if (this.recentLogs.length > 0) {
+        logEntry += `- **Detailed Events**:\n`;
+        this.recentLogs.slice(0, 20).forEach(l => {
+          logEntry += `  - [${l.timestamp}] [${l.level.toUpperCase()}] ${l.message}\n`;
+        });
+      }
       logEntry += `\n---\n`;
 
       const logPath = 'cosync-sync-log.md';
@@ -1463,7 +1552,10 @@ class CoSyncPlugin extends Plugin {
         await this.app.vault.create(logPath, `# CoSync Sync Logs\n\n` + logEntry);
       }
 
-      console.log('CoSync: Background synchronization completed successfully.');
+      this.logEvent(
+        errors.length > 0 ? 'warn' : 'success', 
+        `Synchronization complete. Uploads: ${uploadedCount}, Downloads: ${downloadedCount}, Deletions: ${deletedCount}`
+      );
       
       if (this.wsProvider?.wsconnected) {
         this.updateStatusBar('connected');
@@ -1484,7 +1576,7 @@ class CoSyncPlugin extends Plugin {
         new Notice(msg);
       }
     } catch (err: any) {
-      console.error('CoSync: Background sync failed:', err);
+      this.logEvent('error', `Fatal sync error: ${err.message || err}`);
       errors.push(`Fatal sync error: ${err.message || err}`);
       
       const timestamp = new Date().toLocaleString();
@@ -1782,6 +1874,24 @@ class CoSyncPlugin extends Plugin {
     }
   }
 
+  async activateView() {
+    const { workspace } = this.app;
+
+    let leaf = workspace.getLeavesOfType(COSYNC_VIEW_TYPE)[0];
+    if (!leaf) {
+      const rightLeaf = workspace.getRightLeaf(false);
+      if (rightLeaf) {
+        leaf = rightLeaf;
+        await leaf.setViewState({
+          type: COSYNC_VIEW_TYPE,
+          active: true
+        });
+      }
+    }
+    if (leaf) {
+      workspace.revealLeaf(leaf);
+    }
+  }
 
 }
 
@@ -2039,6 +2149,169 @@ function applyDiff(ytext: Y.Text, baseText: string, newText: string) {
     }
     if (insertText.length > 0) {
       ytext.insert(commonPrefixLen, insertText);
+    }
+  }
+}
+
+const COSYNC_VIEW_TYPE = 'cosync-collaboration-view';
+
+class CoSyncView extends ItemView {
+  private plugin: CoSyncPlugin;
+
+  constructor(leaf: WorkspaceLeaf, plugin: CoSyncPlugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+
+  getViewType(): string {
+    return COSYNC_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return 'CoSync Collaboration';
+  }
+
+  getIcon(): string {
+    return 'users';
+  }
+
+  async onOpen() {
+    this.render();
+    this.registerEvent(
+      this.app.workspace.on('active-leaf-change', () => this.render())
+    );
+  }
+
+  async onClose() {
+    // Cleanup if needed
+  }
+
+  public render() {
+    const container = this.contentEl;
+    container.empty();
+    container.addClass('cosync-sidebar-view');
+
+    // Header title
+    const header = container.createEl('div', { cls: 'cosync-sidebar-header' });
+    header.createEl('h3', { text: 'CoSync Collab' });
+
+    // Status pill
+    const status = this.plugin.getConnectionStatus();
+    const statusCard = container.createEl('div', { cls: 'cosync-status-card' });
+    const statusDot = statusCard.createEl('span', { cls: `cosync-status-dot status-${status}` });
+    const statusText = statusCard.createEl('span', { cls: 'cosync-status-text' });
+
+    if (status === 'connected') {
+      statusText.textContent = 'Connected';
+    } else if (status === 'connecting') {
+      statusText.textContent = 'Connecting...';
+    } else if (status === 'disconnected') {
+      statusText.textContent = 'Offline';
+    } else if (status === 'syncing') {
+      statusText.textContent = 'Syncing...';
+    }
+
+    // Quick Actions
+    const quickActions = container.createEl('div', { cls: 'cosync-quick-actions' });
+    
+    const syncBtn = quickActions.createEl('button', { cls: 'cosync-quick-btn accent', text: '🔄 Sync Now' });
+    syncBtn.addEventListener('click', () => {
+      this.plugin.syncEntireVault();
+    });
+
+    const reconnectBtn = quickActions.createEl('button', { cls: 'cosync-quick-btn', text: '⚡ Reconnect' });
+    reconnectBtn.addEventListener('click', () => {
+      this.plugin.reconnect();
+    });
+
+    // Active Note Info
+    const activeFile = this.plugin.getActiveFile();
+    const docSection = container.createEl('div', { cls: 'cosync-section' });
+    docSection.createEl('h4', { text: 'Active Note' });
+    const docInfo = docSection.createEl('div', { cls: 'cosync-doc-info' });
+
+    if (activeFile) {
+      const docTitle = docInfo.createEl('div', { cls: 'cosync-doc-title' });
+      docTitle.createEl('span', { text: '📄 ', cls: 'cosync-doc-icon' });
+      docTitle.createEl('span', { text: activeFile.basename, cls: 'cosync-doc-name' });
+    } else {
+      docInfo.createEl('div', { cls: 'cosync-doc-title empty', text: 'No note open' });
+    }
+
+    // Collaborators list
+    const collaboratorsSection = container.createEl('div', { cls: 'cosync-section' });
+    collaboratorsSection.createEl('h4', { text: 'Active Collaborators' });
+    const listEl = collaboratorsSection.createEl('div', { cls: 'cosync-collaborators-list' });
+
+    const collaborators = this.plugin.getCollaborators();
+    if (collaborators.length > 0) {
+      collaborators.forEach(user => {
+        const userRow = listEl.createEl('div', { cls: 'cosync-user-row' });
+
+        const avatar = userRow.createEl('div', { cls: 'cosync-user-avatar' });
+        avatar.style.backgroundColor = user.color;
+        avatar.textContent = user.name.charAt(0).toUpperCase();
+
+        const nameSpan = userRow.createEl('span', { cls: 'cosync-user-name' });
+        nameSpan.textContent = user.name;
+
+        if (user.isSelf) {
+          userRow.createEl('span', { cls: 'cosync-self-badge', text: 'you' });
+        }
+      });
+    } else {
+      listEl.createEl('div', { cls: 'cosync-no-collaborators', text: 'No other collaborators' });
+    }
+
+    // Capture version button
+    if (activeFile && status === 'connected') {
+      const actionsSection = container.createEl('div', { cls: 'cosync-actions-section' });
+      const captureBtn = actionsSection.createEl('button', { cls: 'cosync-btn btn-primary', text: 'Capture Version' });
+      captureBtn.addEventListener('click', async () => {
+        captureBtn.disabled = true;
+        captureBtn.textContent = 'Capturing...';
+        try {
+          await this.plugin.manualCaptureVersion();
+          new Notice('Version captured successfully!');
+        } catch (err: any) {
+          new Notice(`Failed to capture version: ${err.message}`);
+        } finally {
+          captureBtn.disabled = false;
+          captureBtn.textContent = 'Capture Version';
+        }
+      });
+    }
+
+    // Recent Sync Logs Panel (Useful details for user debugging)
+    const logsSection = container.createEl('div', { cls: 'cosync-section' });
+    const logsHeader = logsSection.createEl('div', { cls: 'cosync-logs-header' });
+    logsHeader.createEl('h4', { text: 'Sync Activity Log' });
+    
+    const clearLogs = logsHeader.createEl('span', { cls: 'cosync-logs-clear', text: 'Clear' });
+    clearLogs.addEventListener('click', () => {
+      this.plugin.recentLogs = [];
+      this.render();
+    });
+
+    const logsPanel = logsSection.createEl('div', { cls: 'cosync-logs-panel' });
+    
+    if (this.plugin.recentLogs.length > 0) {
+      this.plugin.recentLogs.forEach(log => {
+        const row = logsPanel.createEl('div', { cls: 'cosync-log-row' });
+        
+        const time = row.createEl('span', { cls: 'cosync-log-time', text: log.timestamp });
+        
+        const text = row.createEl('span', { 
+          cls: `cosync-log-text log-${log.level}`, 
+          text: log.message 
+        });
+      });
+    } else {
+      const emptyRow = logsPanel.createEl('div', { 
+        cls: 'cosync-log-row', 
+        text: 'No sync activity yet.' 
+      });
+      emptyRow.style.cssText = 'color: var(--text-muted); font-style: italic; text-align: center; margin-top: 20px;';
     }
   }
 }

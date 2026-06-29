@@ -275,3 +275,107 @@
   cursor: not-allowed;
 }
 
+/* CoSync Sidebar Logs Panel Styles */
+.cosync-logs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.cosync-logs-clear {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-decoration: underline;
+  transition: color 0.15s ease;
+}
+
+.cosync-logs-clear:hover {
+  color: var(--text-normal);
+}
+
+.cosync-logs-panel {
+  background-color: var(--background-secondary-alt);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  height: 180px;
+  overflow-y: auto;
+  font-family: var(--font-monospace), monospace;
+  font-size: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cosync-log-row {
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  padding-bottom: 4px;
+}
+
+.cosync-log-time {
+  color: var(--text-muted);
+  margin-right: 6px;
+}
+
+.cosync-log-text.log-success {
+  color: #10b981; /* Emerald Green */
+}
+
+.cosync-log-text.log-info {
+  color: var(--text-normal);
+}
+
+.cosync-log-text.log-warn {
+  color: #f59e0b; /* Amber */
+}
+
+.cosync-log-text.log-error {
+  color: #ef4444; /* Red */
+  font-weight: 600;
+}
+
+/* Quick Action Buttons in Sidebar */
+.cosync-quick-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+.cosync-quick-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background-color: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cosync-quick-btn:hover {
+  background-color: var(--background-modifier-hover);
+  color: var(--text-normal);
+  border-color: var(--background-modifier-border-focus);
+}
+
+.cosync-quick-btn.accent {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: transparent;
+}
+
+.cosync-quick-btn.accent:hover {
+  background-color: var(--interactive-accent-hover);
+}
+
