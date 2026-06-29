@@ -183,6 +183,7 @@ class CoSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('modify', (file) => {
         if (file instanceof TFile) {
+          if (file.path === 'cosync-sync-log.md') return;
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
           this.instantSyncTimeout = setTimeout(async () => {
             // 1. Process active note modification (if applicable)
@@ -204,6 +205,7 @@ class CoSyncPlugin extends Plugin {
     // Monitor file creations to trigger instant sync
     this.registerEvent(
       this.app.vault.on('create', (file) => {
+        if (file.path === 'cosync-sync-log.md') return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
@@ -217,6 +219,7 @@ class CoSyncPlugin extends Plugin {
     // Monitor file deletions to trigger instant sync
     this.registerEvent(
       this.app.vault.on('delete', (file) => {
+        if (file.path === 'cosync-sync-log.md') return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;

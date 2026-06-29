@@ -10457,6 +10457,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (file instanceof import_obsidian.TFile) {
+          if (file.path === "cosync-sync-log.md") return;
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
           this.instantSyncTimeout = setTimeout(async () => {
             await this.handleExternalModification(file);
@@ -10472,6 +10473,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("create", (file) => {
+        if (file.path === "cosync-sync-log.md") return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
@@ -10483,6 +10485,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
+        if (file.path === "cosync-sync-log.md") return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
