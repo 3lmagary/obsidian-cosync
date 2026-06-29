@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, TFile, PluginSettingTab, App, Setting, Notice, ItemView, WorkspaceLeaf } from 'obsidian';
+import { Plugin, MarkdownView, TFile, TFolder, PluginSettingTab, App, Setting, Notice, ItemView, WorkspaceLeaf } from 'obsidian';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { yCollab } from 'y-codemirror.next';
@@ -79,6 +79,8 @@ class CoSyncPlugin extends Plugin {
   // Global Workspace WebSocket notifications connection
   private globalWs: WebSocket | null = null;
   private globalWsReconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  private lastWsUrl: string = '';
+  private lastWsToken: string = '';
 
   public recentLogs: Array<{ timestamp: string; level: 'info' | 'success' | 'warn' | 'error'; message: string }> = [];
 
@@ -248,14 +250,51 @@ class CoSyncPlugin extends Plugin {
       })
     );
 
-    // Monitor file renames/moves to keep mappings up to date
+    // Monitor file renames/moves to keep mappings up to date and trigger instant sync
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
-        if (file instanceof TFile && this.settings.fileMappings?.[oldPath]) {
-          this.settings.fileMappings[file.path] = this.settings.fileMappings[oldPath];
-          delete this.settings.fileMappings[oldPath];
+        let changed = false;
+        if (file instanceof TFile) {
+          if (this.settings.fileMappings?.[oldPath]) {
+            this.settings.fileMappings[file.path] = this.settings.fileMappings[oldPath];
+            delete this.settings.fileMappings[oldPath];
+            changed = true;
+          }
+        } else if (file instanceof TFolder) {
+          // A folder was renamed/moved. Recursively update all file mappings and hashes inside it.
+          const oldPrefix = oldPath + '/';
+          const newPrefix = file.path + '/';
+          
+          if (this.settings.fileMappings) {
+            for (const [path, docId] of Object.entries(this.settings.fileMappings)) {
+              if (path.startsWith(oldPrefix)) {
+                const newPath = newPrefix + path.substring(oldPrefix.length);
+                this.settings.fileMappings[newPath] = docId;
+                delete this.settings.fileMappings[path];
+                changed = true;
+              }
+            }
+          }
+          if (this.settings.syncHashes) {
+            for (const [path, hash] of Object.entries(this.settings.syncHashes)) {
+              if (path.startsWith(oldPrefix)) {
+                const newPath = newPrefix + path.substring(oldPrefix.length);
+                this.settings.syncHashes[newPath] = hash;
+                delete this.settings.syncHashes[path];
+                changed = true;
+              }
+            }
+          }
+        }
+
+        if (changed) {
           this.saveSettings();
         }
+
+        if (this.isApplyingRemoteUpdate) return;
+        if (this.isSyncing) return;
+        if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+        this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
       })
     );
 
@@ -299,10 +338,7 @@ class CoSyncPlugin extends Plugin {
    */
   // Global Workspace WebSocket notifications connection helper functions
   public connectGlobalWebSocket() {
-    if (this.globalWs) {
-      try { this.globalWs.close(); } catch (e) {}
-      this.globalWs = null;
-    }
+    // Clear any existing reconnect timer
     if (this.globalWsReconnectTimeout) {
       clearTimeout(this.globalWsReconnectTimeout);
       this.globalWsReconnectTimeout = null;
@@ -314,12 +350,35 @@ class CoSyncPlugin extends Plugin {
 
     const workspaceId = this.settings.workspaceId || 'default-workspace';
     const wsUrl = this.settings.serverUrl.replace(/^http/, 'ws') + `/workspace/${workspaceId}/global`;
+    const wsToken = this.settings.token;
+
+    // If already connecting or connected with same parameters, reuse it
+    if (this.globalWs && 
+        (this.globalWs.readyState === WebSocket.CONNECTING || this.globalWs.readyState === WebSocket.OPEN) &&
+        wsUrl === this.lastWsUrl &&
+        wsToken === this.lastWsToken) {
+      return;
+    }
+
+    // Clean up previous socket listeners and close old socket to avoid leaks/multiplied events
+    if (this.globalWs) {
+      const oldWs = this.globalWs;
+      this.globalWs = null;
+      oldWs.onmessage = null;
+      oldWs.onclose = null;
+      oldWs.onerror = null;
+      try { oldWs.close(); } catch (e) {}
+    }
+
+    this.lastWsUrl = wsUrl;
+    this.lastWsToken = wsToken;
     this.logEvent('info', `Connecting to global sync notification channel...`);
     
     try {
-      this.globalWs = new WebSocket(wsUrl, ['co-sync-auth', this.settings.token]);
+      const socket = new WebSocket(wsUrl, ['co-sync-auth', wsToken]);
+      this.globalWs = socket;
 
-      this.globalWs.onmessage = (event) => {
+      socket.onmessage = (event) => {
         if (event.data === 'sync') {
           this.logEvent('info', 'Received global sync trigger. Syncing...');
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
@@ -331,13 +390,15 @@ class CoSyncPlugin extends Plugin {
         }
       };
 
-      this.globalWs.onclose = () => {
-        if (this.globalWs) { // only reconnect if not intentionally disconnected
+      socket.onclose = () => {
+        // Only trigger reconnect if this is still the active socket instance
+        if (this.globalWs === socket) {
+          this.globalWs = null;
           this.globalWsReconnectTimeout = setTimeout(() => this.connectGlobalWebSocket(), 5000);
         }
       };
 
-      this.globalWs.onerror = (err) => {
+      socket.onerror = (err) => {
         console.warn('CoSync: Global notification WebSocket error:', err);
       };
     } catch (e) {
@@ -353,8 +414,13 @@ class CoSyncPlugin extends Plugin {
     if (this.globalWs) {
       const ws = this.globalWs;
       this.globalWs = null; // prevent reconnect loop on close
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
       try { ws.close(); } catch (e) {}
     }
+    this.lastWsUrl = '';
+    this.lastWsToken = '';
   }
 
   private async readLocalBinary(filePath: string): Promise<ArrayBuffer> {
@@ -413,6 +479,48 @@ class CoSyncPlugin extends Plugin {
       const fileToDel = localFile || this.app.vault.getAbstractFileByPath(filePath);
       if (fileToDel instanceof TFile) {
         await this.app.vault.delete(fileToDel);
+      }
+    }
+  }
+
+  private async cleanEmptyFolders(deletedFiles: Set<string>) {
+    const foldersToCheck = new Set<string>();
+    for (const filePath of deletedFiles) {
+      const parts = filePath.split('/');
+      if (parts.length > 1) {
+        let current = '';
+        for (let i = 0; i < parts.length - 1; i++) {
+          current = current ? `${current}/${parts[i]}` : parts[i];
+          if (!current.startsWith('.')) {
+            foldersToCheck.add(current);
+          }
+        }
+      }
+    }
+
+    if (foldersToCheck.size === 0) return;
+
+    // Convert to array and sort by depth descending (deepest paths first)
+    const sortedFolders = Array.from(foldersToCheck).sort((a, b) => {
+      return b.split('/').length - a.split('/').length;
+    });
+
+    for (const folderPath of sortedFolders) {
+      const abstractFile = this.app.vault.getAbstractFileByPath(folderPath);
+      if (abstractFile instanceof TFolder) {
+        if (abstractFile.children.length === 0) {
+          try {
+            this.isApplyingRemoteUpdate = true; // prevent triggering file creation events
+            this.programmedModifications.add(folderPath);
+            await this.app.vault.delete(abstractFile);
+            this.logEvent('info', `Deleted empty folder "${folderPath}"`);
+          } catch (err: any) {
+            this.programmedModifications.delete(folderPath);
+            console.warn(`CoSync: Failed to delete empty folder "${folderPath}":`, err);
+          } finally {
+            this.isApplyingRemoteUpdate = false;
+          }
+        }
       }
     }
   }
@@ -844,6 +952,13 @@ class CoSyncPlugin extends Plugin {
       this.updateStatusBar(status as any);
     });
 
+    this.wsProvider.on('sync', (isSynced) => {
+      if (isSynced) {
+        console.log('CoSync: Collaborative room synced. Binding to editor.');
+        this.bindYjsToEditor();
+      }
+    });
+
     // Configure reconnect backoff
     this.wsProvider.maxBackoffTime = 30000;
 
@@ -1208,6 +1323,7 @@ class CoSyncPlugin extends Plugin {
     let deletedCount = 0;
     let reconciledCount = 0;
     const errors: string[] = [];
+    const filesDeletedDuringSync = new Set<string>();
 
     try {
       // 1. Fetch server documents
@@ -1382,6 +1498,7 @@ class CoSyncPlugin extends Plugin {
             try {
               await this.app.vault.delete(localFile);
               deletedCount++;
+              filesDeletedDuringSync.add(filePath);
               this.logEvent('info', `Deleted local note "${filePath}" (synced server deletion)`);
             } catch (err: any) {
               this.programmedModifications.delete(filePath);
@@ -1419,6 +1536,7 @@ class CoSyncPlugin extends Plugin {
             try {
               await this.deleteLocalFile(filePath, localFile);
               deletedCount++;
+              filesDeletedDuringSync.add(filePath);
               this.logEvent('info', `Deleted local attachment "${filePath}" (synced server deletion)`);
             } catch (err: any) {
               this.programmedModifications.delete(filePath);
@@ -1731,6 +1849,11 @@ class CoSyncPlugin extends Plugin {
         await this.app.vault.modify(logFile, logEntry + '\n' + currentContent);
       } else {
         await this.app.vault.create(logPath, `# CoSync Sync Logs\n\n` + logEntry);
+      }
+
+      // Clean empty folders if any files were deleted during sync
+      if (filesDeletedDuringSync.size > 0) {
+        await this.cleanEmptyFolders(filesDeletedDuringSync);
       }
 
       this.logEvent(

@@ -10384,6 +10384,8 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     // Global Workspace WebSocket notifications connection
     this.globalWs = null;
     this.globalWsReconnectTimeout = null;
+    this.lastWsUrl = "";
+    this.lastWsToken = "";
     this.recentLogs = [];
   }
   logEvent(level, message) {
@@ -10513,11 +10515,44 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        if (file instanceof import_obsidian.TFile && this.settings.fileMappings?.[oldPath]) {
-          this.settings.fileMappings[file.path] = this.settings.fileMappings[oldPath];
-          delete this.settings.fileMappings[oldPath];
+        let changed = false;
+        if (file instanceof import_obsidian.TFile) {
+          if (this.settings.fileMappings?.[oldPath]) {
+            this.settings.fileMappings[file.path] = this.settings.fileMappings[oldPath];
+            delete this.settings.fileMappings[oldPath];
+            changed = true;
+          }
+        } else if (file instanceof import_obsidian.TFolder) {
+          const oldPrefix = oldPath + "/";
+          const newPrefix = file.path + "/";
+          if (this.settings.fileMappings) {
+            for (const [path, docId] of Object.entries(this.settings.fileMappings)) {
+              if (path.startsWith(oldPrefix)) {
+                const newPath = newPrefix + path.substring(oldPrefix.length);
+                this.settings.fileMappings[newPath] = docId;
+                delete this.settings.fileMappings[path];
+                changed = true;
+              }
+            }
+          }
+          if (this.settings.syncHashes) {
+            for (const [path, hash] of Object.entries(this.settings.syncHashes)) {
+              if (path.startsWith(oldPrefix)) {
+                const newPath = newPrefix + path.substring(oldPrefix.length);
+                this.settings.syncHashes[newPath] = hash;
+                delete this.settings.syncHashes[path];
+                changed = true;
+              }
+            }
+          }
+        }
+        if (changed) {
           this.saveSettings();
         }
+        if (this.isApplyingRemoteUpdate) return;
+        if (this.isSyncing) return;
+        if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+        this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
       })
     );
     this.app.workspace.onLayoutReady(() => {
@@ -10553,13 +10588,6 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
    */
   // Global Workspace WebSocket notifications connection helper functions
   connectGlobalWebSocket() {
-    if (this.globalWs) {
-      try {
-        this.globalWs.close();
-      } catch (e) {
-      }
-      this.globalWs = null;
-    }
     if (this.globalWsReconnectTimeout) {
       clearTimeout(this.globalWsReconnectTimeout);
       this.globalWsReconnectTimeout = null;
@@ -10569,10 +10597,28 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     }
     const workspaceId = this.settings.workspaceId || "default-workspace";
     const wsUrl = this.settings.serverUrl.replace(/^http/, "ws") + `/workspace/${workspaceId}/global`;
+    const wsToken = this.settings.token;
+    if (this.globalWs && (this.globalWs.readyState === WebSocket.CONNECTING || this.globalWs.readyState === WebSocket.OPEN) && wsUrl === this.lastWsUrl && wsToken === this.lastWsToken) {
+      return;
+    }
+    if (this.globalWs) {
+      const oldWs = this.globalWs;
+      this.globalWs = null;
+      oldWs.onmessage = null;
+      oldWs.onclose = null;
+      oldWs.onerror = null;
+      try {
+        oldWs.close();
+      } catch (e) {
+      }
+    }
+    this.lastWsUrl = wsUrl;
+    this.lastWsToken = wsToken;
     this.logEvent("info", `Connecting to global sync notification channel...`);
     try {
-      this.globalWs = new WebSocket(wsUrl, ["co-sync-auth", this.settings.token]);
-      this.globalWs.onmessage = (event) => {
+      const socket = new WebSocket(wsUrl, ["co-sync-auth", wsToken]);
+      this.globalWs = socket;
+      socket.onmessage = (event) => {
         if (event.data === "sync") {
           this.logEvent("info", "Received global sync trigger. Syncing...");
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
@@ -10583,12 +10629,13 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           }, 500);
         }
       };
-      this.globalWs.onclose = () => {
-        if (this.globalWs) {
+      socket.onclose = () => {
+        if (this.globalWs === socket) {
+          this.globalWs = null;
           this.globalWsReconnectTimeout = setTimeout(() => this.connectGlobalWebSocket(), 5e3);
         }
       };
-      this.globalWs.onerror = (err) => {
+      socket.onerror = (err) => {
         console.warn("CoSync: Global notification WebSocket error:", err);
       };
     } catch (e) {
@@ -10603,11 +10650,16 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     if (this.globalWs) {
       const ws = this.globalWs;
       this.globalWs = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
       try {
         ws.close();
       } catch (e) {
       }
     }
+    this.lastWsUrl = "";
+    this.lastWsToken = "";
   }
   async readLocalBinary(filePath) {
     if (filePath.startsWith(".")) {
@@ -10661,6 +10713,43 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       const fileToDel = localFile || this.app.vault.getAbstractFileByPath(filePath);
       if (fileToDel instanceof import_obsidian.TFile) {
         await this.app.vault.delete(fileToDel);
+      }
+    }
+  }
+  async cleanEmptyFolders(deletedFiles) {
+    const foldersToCheck = /* @__PURE__ */ new Set();
+    for (const filePath of deletedFiles) {
+      const parts = filePath.split("/");
+      if (parts.length > 1) {
+        let current = "";
+        for (let i = 0; i < parts.length - 1; i++) {
+          current = current ? `${current}/${parts[i]}` : parts[i];
+          if (!current.startsWith(".")) {
+            foldersToCheck.add(current);
+          }
+        }
+      }
+    }
+    if (foldersToCheck.size === 0) return;
+    const sortedFolders = Array.from(foldersToCheck).sort((a, b) => {
+      return b.split("/").length - a.split("/").length;
+    });
+    for (const folderPath of sortedFolders) {
+      const abstractFile = this.app.vault.getAbstractFileByPath(folderPath);
+      if (abstractFile instanceof import_obsidian.TFolder) {
+        if (abstractFile.children.length === 0) {
+          try {
+            this.isApplyingRemoteUpdate = true;
+            this.programmedModifications.add(folderPath);
+            await this.app.vault.delete(abstractFile);
+            this.logEvent("info", `Deleted empty folder "${folderPath}"`);
+          } catch (err) {
+            this.programmedModifications.delete(folderPath);
+            console.warn(`CoSync: Failed to delete empty folder "${folderPath}":`, err);
+          } finally {
+            this.isApplyingRemoteUpdate = false;
+          }
+        }
       }
     }
   }
@@ -11016,6 +11105,12 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.wsProvider.on("status", ({ status }) => {
       this.updateStatusBar(status);
     });
+    this.wsProvider.on("sync", (isSynced) => {
+      if (isSynced) {
+        console.log("CoSync: Collaborative room synced. Binding to editor.");
+        this.bindYjsToEditor();
+      }
+    });
     this.wsProvider.maxBackoffTime = 3e4;
     const userName = this.settings.displayName || "Obsidian User";
     this.wsProvider.awareness.setLocalStateField("user", {
@@ -11296,6 +11391,7 @@ ${localContent}
     let deletedCount = 0;
     let reconciledCount = 0;
     const errors = [];
+    const filesDeletedDuringSync = /* @__PURE__ */ new Set();
     try {
       let serverDocs = await this.fetchServerDocuments(true);
       const attachResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments`, {
@@ -11443,6 +11539,7 @@ ${localContent}
             try {
               await this.app.vault.delete(localFile);
               deletedCount++;
+              filesDeletedDuringSync.add(filePath);
               this.logEvent("info", `Deleted local note "${filePath}" (synced server deletion)`);
             } catch (err) {
               this.programmedModifications.delete(filePath);
@@ -11476,6 +11573,7 @@ ${localContent}
             try {
               await this.deleteLocalFile(filePath, localFile);
               deletedCount++;
+              filesDeletedDuringSync.add(filePath);
               this.logEvent("info", `Deleted local attachment "${filePath}" (synced server deletion)`);
             } catch (err) {
               this.programmedModifications.delete(filePath);
@@ -11751,6 +11849,9 @@ ${localContent}
         await this.app.vault.create(logPath, `# CoSync Sync Logs
 
 ` + logEntry);
+      }
+      if (filesDeletedDuringSync.size > 0) {
+        await this.cleanEmptyFolders(filesDeletedDuringSync);
       }
       this.logEvent(
         errors.length > 0 ? "warn" : "success",

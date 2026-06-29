@@ -2,11 +2,11 @@
 /* Hidden remote cursors as requested: only broadcast local cursor, do not show remote ones */
 
 .cm-ySelection {
-  background-color: rgba(139, 92, 246, 0.25) !important;
+  background-color: rgba(139, 92, 246, 0.25);
 }
 
 .cm-yLineSelection {
-  background-color: rgba(139, 92, 246, 0.1) !important;
+  background-color: rgba(139, 92, 246, 0.1);
 }
 
 .cm-ySelectionCaret {
