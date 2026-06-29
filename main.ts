@@ -184,6 +184,11 @@ class CoSyncPlugin extends Plugin {
       this.app.vault.on('modify', (file) => {
         if (file instanceof TFile) {
           if (file.path === 'cosync-sync-log.md') return;
+          if (this.isApplyingRemoteUpdate) return;
+          if (this.programmedModifications.has(file.path)) {
+            this.programmedModifications.delete(file.path);
+            return;
+          }
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
           this.instantSyncTimeout = setTimeout(async () => {
             // 1. Process active note modification (if applicable)
@@ -206,6 +211,7 @@ class CoSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('create', (file) => {
         if (file.path === 'cosync-sync-log.md') return;
+        if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
@@ -220,6 +226,7 @@ class CoSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('delete', (file) => {
         if (file.path === 'cosync-sync-log.md') return;
+        if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
@@ -1073,7 +1080,7 @@ class CoSyncPlugin extends Plugin {
 
     try {
       // 1. Fetch server documents
-      const serverDocs = await this.fetchServerDocuments(true);
+      let serverDocs = await this.fetchServerDocuments(true);
 
       // 2. Fetch server attachments
       const attachResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments`, {
@@ -1085,7 +1092,7 @@ class CoSyncPlugin extends Plugin {
       if (!attachResponse.ok) {
         throw new Error(`Failed to fetch attachments: ${attachResponse.statusText}`);
       }
-      const serverAttachments: Array<{ id: string; filepath: string; hash: string; size: number }> = await attachResponse.json();
+      let serverAttachments: Array<{ id: string; filepath: string; hash: string; size: number }> = await attachResponse.json();
       const serverAttachMap = new Map(serverAttachments.map(a => [a.filepath.toLowerCase(), a]));
 
       // 3. Scan local files
@@ -1139,6 +1146,7 @@ class CoSyncPlugin extends Plugin {
             if (res.ok) {
               deletedCount++;
               this.logEvent('success', `Deleted server document for note "${filePath}"`);
+              serverDocs = serverDocs.filter(d => d.id !== docId);
             } else {
               this.logEvent('error', `Failed to delete server document for "${filePath}": HTTP ${res.status}`);
               errors.push(`Failed to delete server document for "${filePath}": HTTP ${res.status}`);
@@ -1165,6 +1173,7 @@ class CoSyncPlugin extends Plugin {
             if (res.ok) {
               deletedCount++;
               this.logEvent('success', `Deleted server attachment "${filePath}"`);
+              serverAttachments = serverAttachments.filter(a => a.filepath.toLowerCase() !== filePath.toLowerCase());
             } else {
               this.logEvent('error', `Failed to delete server attachment for "${filePath}": HTTP ${res.status}`);
               errors.push(`Failed to delete server attachment for "${filePath}": HTTP ${res.status}`);

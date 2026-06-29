@@ -10458,6 +10458,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       this.app.vault.on("modify", (file) => {
         if (file instanceof import_obsidian.TFile) {
           if (file.path === "cosync-sync-log.md") return;
+          if (this.isApplyingRemoteUpdate) return;
+          if (this.programmedModifications.has(file.path)) {
+            this.programmedModifications.delete(file.path);
+            return;
+          }
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
           this.instantSyncTimeout = setTimeout(async () => {
             await this.handleExternalModification(file);
@@ -10474,6 +10479,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.registerEvent(
       this.app.vault.on("create", (file) => {
         if (file.path === "cosync-sync-log.md") return;
+        if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
@@ -10486,6 +10492,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (file.path === "cosync-sync-log.md") return;
+        if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
@@ -11168,7 +11175,7 @@ ${localContent}
     let reconciledCount = 0;
     const errors = [];
     try {
-      const serverDocs = await this.fetchServerDocuments(true);
+      let serverDocs = await this.fetchServerDocuments(true);
       const attachResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments`, {
         method: "GET",
         headers: {
@@ -11178,7 +11185,7 @@ ${localContent}
       if (!attachResponse.ok) {
         throw new Error(`Failed to fetch attachments: ${attachResponse.statusText}`);
       }
-      const serverAttachments = await attachResponse.json();
+      let serverAttachments = await attachResponse.json();
       const serverAttachMap = new Map(serverAttachments.map((a) => [a.filepath.toLowerCase(), a]));
       const localFiles = this.app.vault.getFiles();
       const localSyncable = localFiles.filter((f) => {
@@ -11221,6 +11228,7 @@ ${localContent}
             if (res.ok) {
               deletedCount++;
               this.logEvent("success", `Deleted server document for note "${filePath}"`);
+              serverDocs = serverDocs.filter((d) => d.id !== docId);
             } else {
               this.logEvent("error", `Failed to delete server document for "${filePath}": HTTP ${res.status}`);
               errors.push(`Failed to delete server document for "${filePath}": HTTP ${res.status}`);
@@ -11246,6 +11254,7 @@ ${localContent}
             if (res.ok) {
               deletedCount++;
               this.logEvent("success", `Deleted server attachment "${filePath}"`);
+              serverAttachments = serverAttachments.filter((a) => a.filepath.toLowerCase() !== filePath.toLowerCase());
             } else {
               this.logEvent("error", `Failed to delete server attachment for "${filePath}": HTTP ${res.status}`);
               errors.push(`Failed to delete server attachment for "${filePath}": HTTP ${res.status}`);
