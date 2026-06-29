@@ -1055,11 +1055,23 @@ class CoSyncPlugin extends Plugin {
         serverDocTitleMap.set(d.title.trim().toLowerCase(), d);
       });
 
+      // Purge invalid non-syncable mappings from settings to clean up historical/corrupted settings
+      for (const filePath of Object.keys(this.settings.fileMappings)) {
+        const ext = filePath.split('.').pop()?.toLowerCase();
+        if (!ext || !SYNCABLE_EXTENSIONS.has(ext)) {
+          const docId = this.settings.fileMappings[filePath];
+          delete this.settings.fileMappings[filePath];
+          delete this.settings.syncHashes[docId];
+          delete this.settings.syncVersions[docId];
+        }
+      }
+
       // --- PHASE 0: Two-Way Deletion Sync ---
 
       // 0A. Propagate Local Deletions to Server
       for (const [filePath, docId] of Object.entries(this.settings.fileMappings)) {
-        const isMarkdown = filePath.endsWith('.md') || filePath.endsWith('.txt');
+        const ext = filePath.split('.').pop()?.toLowerCase();
+        const isMarkdown = ext && SYNCABLE_EXTENSIONS.has(ext);
         if (isMarkdown && !localSyncableMap.has(filePath.toLowerCase())) {
           console.log(`CoSync: Document "${filePath}" was deleted locally. Deleting on server...`);
           try {
@@ -1076,7 +1088,7 @@ class CoSyncPlugin extends Plugin {
             errors.push(`Failed to delete server document for "${filePath}": ${err.message || err}`);
           }
           delete this.settings.fileMappings[filePath];
-          delete this.settings.syncHashes[filePath];
+          delete this.settings.syncHashes[docId];
           delete this.settings.syncVersions[docId];
         }
       }
@@ -1113,13 +1125,13 @@ class CoSyncPlugin extends Plugin {
             // Check if there are unsynced local changes
             const localContent = await this.app.vault.read(localFile);
             const localHash = getContentHash(localContent);
-            const lastSyncedHash = this.settings.syncHashes[filePath];
+            const lastSyncedHash = this.settings.syncHashes[docId];
             const localChanged = localHash !== lastSyncedHash;
 
             if (localChanged) {
               console.log(`CoSync: Document "${filePath}" was deleted on server but has local changes. Re-uploading...`);
               delete this.settings.fileMappings[filePath];
-              delete this.settings.syncHashes[filePath];
+              delete this.settings.syncHashes[docId];
               delete this.settings.syncVersions[docId];
               continue;
             }
@@ -1138,7 +1150,7 @@ class CoSyncPlugin extends Plugin {
             }
           }
           delete this.settings.fileMappings[filePath];
-          delete this.settings.syncHashes[filePath];
+          delete this.settings.syncHashes[docId];
           delete this.settings.syncVersions[docId];
         }
       }
@@ -1290,14 +1302,27 @@ class CoSyncPlugin extends Plugin {
         if (!isMapped) {
           // Check if a file with the same title path already exists (case-insensitive)
           const lowerTitle = doc.title.toLowerCase();
+          
+          // Get the extension of the document title
+          const pathParts = lowerTitle.split('/');
+          const fileName = pathParts[pathParts.length - 1];
+          const fileParts = fileName.split('.');
+          const ext = fileParts.length > 1 ? fileParts[fileParts.length - 1] : '';
+
+          // If the title has an extension and it's not syncable, skip it!
+          if (ext && !SYNCABLE_EXTENSIONS.has(ext)) {
+            continue;
+          }
+
           let expectedPath = doc.title;
           let isMarkdown = false;
-          if (lowerTitle.endsWith('.canvas') || lowerTitle.endsWith('.excalidraw') || lowerTitle.endsWith('.json') || lowerTitle.endsWith('.txt')) {
+          if (ext === 'txt') {
             isMarkdown = false;
-          } else if (lowerTitle.endsWith('.md')) {
+          } else if (ext === 'md') {
             isMarkdown = true;
           } else {
-            expectedPath = `${doc.title}.md`;
+            // No extension or unrecognized, default to .md
+            expectedPath = expectedPath.endsWith('.md') ? expectedPath : `${expectedPath}.md`;
             isMarkdown = true;
           }
 
