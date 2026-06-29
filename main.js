@@ -10611,10 +10611,8 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           return;
         }
         const ytext = this.ydoc.getText("codemirror");
-        const editorText = cmView5.state.doc.toString().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        const ytextStr = ytext.toString().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        if (editorText !== ytextStr) {
-          console.log("CoSync: Editor and Yjs text mismatch during binding. Deferring binding until reconciled.");
+        if (!this.wsProvider.synced) {
+          console.log("CoSync: Deferring editor binding until WebSocket provider is synced.");
           return;
         }
         if (this.boundEditorView) {
@@ -11243,7 +11241,7 @@ ${localContent}
         }
       }
       for (const [filePath, lastHash] of Object.entries(this.settings.syncHashes)) {
-        const isMarkdown = filePath.endsWith(".md") || filePath.endsWith(".txt") || filePath.startsWith("doc_") || filePath.startsWith("obs-");
+        const isMarkdown = filePath.endsWith(".md") && !filePath.toLowerCase().endsWith(".excalidraw.md") || filePath.endsWith(".txt") || filePath.startsWith("doc_") || filePath.startsWith("obs-");
         if (!isMarkdown && !localBinaryMap.has(filePath.toLowerCase())) {
           console.log(`CoSync: Attachment "${filePath}" was deleted locally. Deleting on server...`);
           try {
@@ -11304,7 +11302,7 @@ ${localContent}
         }
       }
       for (const [filePath, lastHash] of Object.entries(this.settings.syncHashes)) {
-        const isMarkdown = filePath.endsWith(".md") || filePath.endsWith(".txt") || filePath.startsWith("doc_") || filePath.startsWith("obs-");
+        const isMarkdown = filePath.endsWith(".md") && !filePath.toLowerCase().endsWith(".excalidraw.md") || filePath.endsWith(".txt") || filePath.startsWith("doc_") || filePath.startsWith("obs-");
         if (!isMarkdown && !serverAttachPaths.has(filePath.toLowerCase())) {
           const localFile = localBinaryMap.get(filePath.toLowerCase());
           if (localFile) {
