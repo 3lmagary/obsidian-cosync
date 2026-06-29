@@ -11,18 +11,17 @@
 
 .cm-ySelectionCaret {
   position: relative;
-  border-left: 2px solid #8b5cf6 !important;
+  border-left: 2px solid !important;
   border-right: none;
   margin-left: -1px;
   margin-right: -1px;
-  box-shadow: 0 0 6px #8b5cf6;
+  box-shadow: 0 0 6px currentColor;
 }
 
 .cm-ySelectionInfo {
   position: absolute;
   top: -1.4em;
   left: -2px;
-  background-color: #8b5cf6 !important;
   color: white !important;
   font-family: var(--font-interface), sans-serif;
   font-size: 10px !important;

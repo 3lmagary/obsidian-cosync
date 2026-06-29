@@ -63,6 +63,7 @@ class CoSyncPlugin extends Plugin {
   // In-memory cache for server documents to optimize performance and prevent duplicate requests
   private serverDocsCache: Array<{ id: string; title: string; updatedAt: string; version: number }> | null = null;
   private serverDocsCacheTime = 0;
+  private downloadedFilesCooldown: Map<string, number> = new Map();
   
   // CodeMirror 6 configuration compartment
   private yjsCompartment = new Compartment();
@@ -1599,6 +1600,11 @@ class CoSyncPlugin extends Plugin {
       // Upload missing/modified attachments
       for (const file of localBinary) {
         try {
+          const cooldownTime = this.downloadedFilesCooldown.get(file.path.toLowerCase());
+          if (cooldownTime && (Date.now() - cooldownTime < 4000)) {
+            console.log(`CoSync: Skipping upload of recently downloaded file under cooldown: ${file.path}`);
+            continue;
+          }
           const localBuffer = await this.readLocalBinary(file.path);
           const localHash = getBinaryHash(localBuffer);
           const lastSyncedHash = this.settings.syncHashes[file.path];
@@ -1672,6 +1678,7 @@ class CoSyncPlugin extends Plugin {
                 await this.writeLocalBinary(attach.filepath, arrayBuffer);
                 this.logEvent('success', `Downloaded ${localFile ? 'modified' : 'missing'} attachment "${attach.filepath}"`);
                 this.settings.syncHashes[attach.filepath] = attach.hash;
+                this.downloadedFilesCooldown.set(attach.filepath.toLowerCase(), Date.now());
                 downloadedCount++;
               } catch (e: any) {
                 this.programmedModifications.delete(attach.filepath);

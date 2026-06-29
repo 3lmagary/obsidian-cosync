@@ -10371,6 +10371,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     // In-memory cache for server documents to optimize performance and prevent duplicate requests
     this.serverDocsCache = null;
     this.serverDocsCacheTime = 0;
+    this.downloadedFilesCooldown = /* @__PURE__ */ new Map();
     // CodeMirror 6 configuration compartment
     this.yjsCompartment = new import_state.Compartment();
     this.syncTimer = null;
@@ -11620,6 +11621,11 @@ ${localContent}
       }
       for (const file of localBinary) {
         try {
+          const cooldownTime = this.downloadedFilesCooldown.get(file.path.toLowerCase());
+          if (cooldownTime && Date.now() - cooldownTime < 4e3) {
+            console.log(`CoSync: Skipping upload of recently downloaded file under cooldown: ${file.path}`);
+            continue;
+          }
           const localBuffer = await this.readLocalBinary(file.path);
           const localHash = getBinaryHash(localBuffer);
           const lastSyncedHash = this.settings.syncHashes[file.path];
@@ -11684,6 +11690,7 @@ ${localContent}
                 await this.writeLocalBinary(attach.filepath, arrayBuffer);
                 this.logEvent("success", `Downloaded ${localFile ? "modified" : "missing"} attachment "${attach.filepath}"`);
                 this.settings.syncHashes[attach.filepath] = attach.hash;
+                this.downloadedFilesCooldown.set(attach.filepath.toLowerCase(), Date.now());
                 downloadedCount++;
               } catch (e) {
                 this.programmedModifications.delete(attach.filepath);
