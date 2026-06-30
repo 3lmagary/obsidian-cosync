@@ -2256,20 +2256,23 @@ class CoSyncPlugin extends Plugin {
   public getCollaborators() {
     if (!this.wsProvider || !this.wsProvider.awareness) return [];
     const states = this.wsProvider.awareness.getStates();
-    const list: { name: string; color: string; isSelf: boolean }[] = [];
+    const collaboratorMap = new Map<string, { name: string; color: string; isSelf: boolean }>();
     const localClientId = this.wsProvider.awareness.clientID;
     
     for (const [clientId, state] of states.entries()) {
       const user = state.user;
       if (user && typeof user === 'object') {
-        list.push({
-          name: (user as any).name || (user as any).username || 'Anonymous',
-          color: (user as any).color || '#E91E63',
-          isSelf: clientId === localClientId
-        });
+        const name = (user as any).name || (user as any).username || 'Anonymous';
+        const color = (user as any).color || '#E91E63';
+        const isSelf = clientId === localClientId;
+        
+        const existing = collaboratorMap.get(name);
+        if (!existing || isSelf) {
+          collaboratorMap.set(name, { name, color, isSelf });
+        }
       }
     }
-    return list;
+    return Array.from(collaboratorMap.values());
   }
 
   public async manualCaptureVersion() {

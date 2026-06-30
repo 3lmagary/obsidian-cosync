@@ -12206,19 +12206,21 @@ ${localContent}
   getCollaborators() {
     if (!this.wsProvider || !this.wsProvider.awareness) return [];
     const states = this.wsProvider.awareness.getStates();
-    const list = [];
+    const collaboratorMap = /* @__PURE__ */ new Map();
     const localClientId = this.wsProvider.awareness.clientID;
     for (const [clientId, state] of states.entries()) {
       const user = state.user;
       if (user && typeof user === "object") {
-        list.push({
-          name: user.name || user.username || "Anonymous",
-          color: user.color || "#E91E63",
-          isSelf: clientId === localClientId
-        });
+        const name = user.name || user.username || "Anonymous";
+        const color = user.color || "#E91E63";
+        const isSelf = clientId === localClientId;
+        const existing = collaboratorMap.get(name);
+        if (!existing || isSelf) {
+          collaboratorMap.set(name, { name, color, isSelf });
+        }
       }
     }
-    return list;
+    return Array.from(collaboratorMap.values());
   }
   async manualCaptureVersion() {
     if (!this.activeDocumentId) return null;
