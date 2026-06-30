@@ -10388,6 +10388,15 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.lastWsToken = "";
     this.recentLogs = [];
   }
+  addProgrammedModification(path) {
+    this.programmedModifications.add(path.normalize("NFC"));
+  }
+  deleteProgrammedModification(path) {
+    this.programmedModifications.delete(path.normalize("NFC"));
+  }
+  hasProgrammedModification(path) {
+    return this.programmedModifications.has(path.normalize("NFC"));
+  }
   logEvent(level, message) {
     const timestamp = (/* @__PURE__ */ new Date()).toLocaleTimeString();
     this.recentLogs.unshift({ timestamp, level, message });
@@ -10466,9 +10475,10 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       this.app.vault.on("modify", (file) => {
         if (file.path.startsWith(".")) return;
         if (file instanceof import_obsidian.TFile) {
-          if (file.path === "cosync-sync-log.md") return;
-          if (this.programmedModifications.has(file.path)) {
-            this.programmedModifications.delete(file.path);
+          const normalizedPath = file.path.normalize("NFC");
+          if (normalizedPath === "cosync-sync-log.md") return;
+          if (this.hasProgrammedModification(normalizedPath)) {
+            this.deleteProgrammedModification(normalizedPath);
             return;
           }
           if (this.isApplyingRemoteUpdate) return;
@@ -10476,7 +10486,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           this.instantSyncTimeout = setTimeout(async () => {
             await this.handleExternalModification(file);
             const activeMarkdownView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-            if (activeMarkdownView && activeMarkdownView.file?.path === file.path) {
+            if (activeMarkdownView && activeMarkdownView.file?.path.normalize("NFC") === normalizedPath) {
               return;
             }
             if (this.isSyncing) return;
@@ -10487,10 +10497,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("create", (file) => {
-        if (file.path.startsWith(".")) return;
-        if (file.path === "cosync-sync-log.md") return;
-        if (this.programmedModifications.has(file.path)) {
-          this.programmedModifications.delete(file.path);
+        const normalizedPath = file.path.normalize("NFC");
+        if (normalizedPath.startsWith(".")) return;
+        if (normalizedPath === "cosync-sync-log.md") return;
+        if (this.hasProgrammedModification(normalizedPath)) {
+          this.deleteProgrammedModification(normalizedPath);
           return;
         }
         if (this.isApplyingRemoteUpdate) return;
@@ -10501,10 +10512,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        if (file.path.startsWith(".")) return;
-        if (file.path === "cosync-sync-log.md") return;
-        if (this.programmedModifications.has(file.path)) {
-          this.programmedModifications.delete(file.path);
+        const normalizedPath = file.path.normalize("NFC");
+        if (normalizedPath.startsWith(".")) return;
+        if (normalizedPath === "cosync-sync-log.md") return;
+        if (this.hasProgrammedModification(normalizedPath)) {
+          this.deleteProgrammedModification(normalizedPath);
           return;
         }
         if (this.isApplyingRemoteUpdate) return;
@@ -10515,35 +10527,40 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
+        const normalizedPath = file.path.normalize("NFC");
+        const oldPathNormalized = oldPath.normalize("NFC");
         let isProgrammed = false;
-        if (this.programmedModifications.has(file.path)) {
-          this.programmedModifications.delete(file.path);
+        if (this.hasProgrammedModification(normalizedPath)) {
+          this.deleteProgrammedModification(normalizedPath);
           isProgrammed = true;
         }
-        if (this.programmedModifications.has(oldPath)) {
-          this.programmedModifications.delete(oldPath);
+        if (this.hasProgrammedModification(oldPathNormalized)) {
+          this.deleteProgrammedModification(oldPathNormalized);
           isProgrammed = true;
         }
         if (isProgrammed) return;
         let changed = false;
         const renamesToSync = [];
         if (file instanceof import_obsidian.TFile) {
-          if (this.settings.fileMappings?.[oldPath]) {
-            const docId = this.settings.fileMappings[oldPath];
-            this.settings.fileMappings[file.path] = docId;
-            delete this.settings.fileMappings[oldPath];
+          if (this.settings.fileMappings?.[oldPathNormalized]) {
+            const docId = this.settings.fileMappings[oldPathNormalized];
+            this.settings.fileMappings[normalizedPath] = docId;
+            delete this.settings.fileMappings[oldPathNormalized];
             changed = true;
-            renamesToSync.push({ docId, newPath: file.path });
+            renamesToSync.push({ docId, newPath: normalizedPath });
           }
         } else if (file instanceof import_obsidian.TFolder) {
-          const oldPrefix = oldPath + "/";
-          const newPrefix = file.path + "/";
+          const oldPrefix = oldPathNormalized + "/";
+          const newPrefix = normalizedPath + "/";
           if (this.settings.fileMappings) {
             for (const [path, docId] of Object.entries(this.settings.fileMappings)) {
-              if (path.startsWith(oldPrefix)) {
-                const newPath = newPrefix + path.substring(oldPrefix.length);
+              const pathNormalized = path.normalize("NFC");
+              if (pathNormalized.startsWith(oldPrefix)) {
+                const newPath = newPrefix + pathNormalized.substring(oldPrefix.length);
                 this.settings.fileMappings[newPath] = docId;
-                delete this.settings.fileMappings[path];
+                if (pathNormalized !== newPath) {
+                  delete this.settings.fileMappings[path];
+                }
                 changed = true;
                 renamesToSync.push({ docId, newPath });
               }
@@ -10782,11 +10799,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         if (abstractFile.children.length === 0) {
           try {
             this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(folderPath);
+            this.addProgrammedModification(folderPath);
             await this.app.vault.delete(abstractFile);
             this.logEvent("info", `Deleted empty folder "${folderPath}"`);
           } catch (err) {
-            this.programmedModifications.delete(folderPath);
+            this.deleteProgrammedModification(folderPath);
             console.warn(`CoSync: Failed to delete empty folder "${folderPath}":`, err);
           } finally {
             this.isApplyingRemoteUpdate = false;
@@ -11004,17 +11021,18 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
    * 4. If not found, creates a new document on server and writes it to frontmatter.
    */
   async resolveDocumentId(file) {
+    const normalizedPath = file.path.normalize("NFC");
     try {
       if (!this.settings.fileMappings) {
         this.settings.fileMappings = {};
       }
       const documents = await this.fetchServerDocuments();
       const serverDocIdSet = new Set(documents.map((d) => d.id));
-      const title = file.path.endsWith(".md") ? file.path.slice(0, -3) : file.path;
+      const title = normalizedPath.endsWith(".md") ? normalizedPath.slice(0, -3) : normalizedPath;
       const matchByTitle = documents.find((d) => d.title.trim().toLowerCase() === title.trim().toLowerCase());
-      let docId = this.settings.fileMappings[file.path];
+      let docId = this.settings.fileMappings[normalizedPath];
       if (docId && serverDocIdSet.has(docId)) {
-        const currentTitle = file.path.endsWith(".md") ? file.path.slice(0, -3) : file.path;
+        const currentTitle = normalizedPath.endsWith(".md") ? normalizedPath.slice(0, -3) : normalizedPath;
         fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`, {
           method: "PUT",
           headers: {
@@ -11029,29 +11047,29 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       const existingId = cache?.frontmatter?.["cosyncId"];
       if (existingId && serverDocIdSet.has(existingId)) {
         console.log(`CoSync: Found existing document ID in metadata cache: ${existingId}`);
-        this.settings.fileMappings[file.path] = existingId;
+        this.settings.fileMappings[normalizedPath] = existingId;
         await this.saveSettings();
         return existingId;
       }
       if (matchByTitle) {
         docId = matchByTitle.id;
         console.log(`CoSync: Found matching document on server by title: ${title} (${docId})`);
-        this.settings.fileMappings[file.path] = docId;
+        this.settings.fileMappings[normalizedPath] = docId;
         const isMarkdown2 = file.extension.toLowerCase() === "md";
         if (isMarkdown2) {
           const fileContent2 = await this.app.vault.read(file);
           const contentWithId = stripCosyncId(fileContent2);
           this.isApplyingRemoteUpdate = true;
-          this.programmedModifications.add(file.path);
+          this.addProgrammedModification(normalizedPath);
           try {
             await this.app.vault.modify(file, contentWithId);
           } catch (err) {
-            this.programmedModifications.delete(file.path);
+            this.deleteProgrammedModification(normalizedPath);
           } finally {
             this.isApplyingRemoteUpdate = false;
           }
         }
-        this.settings.fileMappings[file.path] = docId;
+        this.settings.fileMappings[normalizedPath] = docId;
         await this.saveSettings();
         return docId;
       }
@@ -11076,16 +11094,16 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       if (isMarkdown) {
         const contentWithId = stripCosyncId(fileContent);
         this.isApplyingRemoteUpdate = true;
-        this.programmedModifications.add(file.path);
+        this.addProgrammedModification(normalizedPath);
         try {
           await this.app.vault.modify(file, contentWithId);
         } catch (err) {
-          this.programmedModifications.delete(file.path);
+          this.deleteProgrammedModification(normalizedPath);
         } finally {
           this.isApplyingRemoteUpdate = false;
         }
       }
-      this.settings.fileMappings[file.path] = docId;
+      this.settings.fileMappings[normalizedPath] = docId;
       await this.saveSettings();
       return docId;
     } catch (err) {
@@ -11376,9 +11394,21 @@ ${localContent}
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     if (!this.settings.syncHashes) {
       this.settings.syncHashes = {};
+    } else {
+      const normalizedSyncHashes = {};
+      for (const [key, val] of Object.entries(this.settings.syncHashes)) {
+        normalizedSyncHashes[key.normalize("NFC")] = val;
+      }
+      this.settings.syncHashes = normalizedSyncHashes;
     }
     if (!this.settings.fileMappings) {
       this.settings.fileMappings = {};
+    } else {
+      const normalizedFileMappings = {};
+      for (const [key, val] of Object.entries(this.settings.fileMappings)) {
+        normalizedFileMappings[key.normalize("NFC")] = val;
+      }
+      this.settings.fileMappings = normalizedFileMappings;
     }
   }
   async saveSettings() {
@@ -11490,16 +11520,17 @@ ${localContent}
           }
         }
       }
-      const localSyncableMap = new Map(localSyncable.map((f) => [f.path.toLowerCase(), f]));
-      const localBinaryMap = new Map(localBinary.map((f) => [f.path.toLowerCase(), f]));
+      const localSyncableMap = new Map(localSyncable.map((f) => [f.path.normalize("NFC").toLowerCase(), f]));
+      const localBinaryMap = new Map(localBinary.map((f) => [f.path.normalize("NFC").toLowerCase(), f]));
       const serverDocIdMap = /* @__PURE__ */ new Map();
       const serverDocTitleMap = /* @__PURE__ */ new Map();
       serverDocs.forEach((d) => {
         serverDocIdMap.set(d.id, d);
-        serverDocTitleMap.set(d.title.trim().toLowerCase(), d);
+        serverDocTitleMap.set(d.title.trim().normalize("NFC").toLowerCase(), d);
       });
       for (const filePath of Object.keys(this.settings.fileMappings)) {
-        const ext = filePath.split(".").pop()?.toLowerCase();
+        const filePathNormalized = filePath.normalize("NFC");
+        const ext = filePathNormalized.split(".").pop()?.toLowerCase();
         if (!ext || !SYNCABLE_EXTENSIONS.has(ext)) {
           const docId = this.settings.fileMappings[filePath];
           delete this.settings.fileMappings[filePath];
@@ -11508,10 +11539,11 @@ ${localContent}
         }
       }
       for (const [filePath, docId] of Object.entries(this.settings.fileMappings)) {
-        const ext = filePath.split(".").pop()?.toLowerCase();
+        const filePathNormalized = filePath.normalize("NFC");
+        const ext = filePathNormalized.split(".").pop()?.toLowerCase();
         const isMarkdown = ext && SYNCABLE_EXTENSIONS.has(ext);
-        if (isMarkdown && !localSyncableMap.has(filePath.toLowerCase())) {
-          console.log(`CoSync: Document "${filePath}" was deleted locally. Deleting on server...`);
+        if (isMarkdown && !localSyncableMap.has(filePathNormalized.toLowerCase())) {
+          console.log(`CoSync: Document "${filePathNormalized}" was deleted locally. Deleting on server...`);
           try {
             const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`, {
               method: "DELETE",
@@ -11535,34 +11567,36 @@ ${localContent}
         }
       }
       for (const [filePath, lastHash] of Object.entries(this.settings.syncHashes)) {
-        const isMarkdown = filePath.endsWith(".md") && !filePath.toLowerCase().endsWith(".excalidraw.md") || filePath.endsWith(".txt") || filePath.startsWith("doc_") || filePath.startsWith("obs-");
-        if (!isMarkdown && !localBinaryMap.has(filePath.toLowerCase())) {
-          console.log(`CoSync: Attachment "${filePath}" was deleted locally. Deleting on server...`);
+        const filePathNormalized = filePath.normalize("NFC");
+        const isMarkdown = filePathNormalized.endsWith(".md") && !filePathNormalized.toLowerCase().endsWith(".excalidraw.md") || filePathNormalized.endsWith(".txt") || filePathNormalized.startsWith("doc_") || filePathNormalized.startsWith("obs-");
+        if (!isMarkdown && !localBinaryMap.has(filePathNormalized.toLowerCase())) {
+          console.log(`CoSync: Attachment "${filePathNormalized}" was deleted locally. Deleting on server...`);
           try {
-            const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments?filepath=${encodeURIComponent(filePath)}`, {
+            const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments?filepath=${encodeURIComponent(filePathNormalized)}`, {
               method: "DELETE",
               headers: { "Authorization": `Bearer ${this.settings.token}` }
             });
             if (res.ok) {
               deletedCount++;
-              this.logEvent("success", `Deleted server attachment "${filePath}"`);
-              serverAttachments = serverAttachments.filter((a) => a.filepath.toLowerCase() !== filePath.toLowerCase());
+              this.logEvent("success", `Deleted server attachment "${filePathNormalized}"`);
+              serverAttachments = serverAttachments.filter((a) => a.filepath.normalize("NFC").toLowerCase() !== filePathNormalized.toLowerCase());
             } else {
-              this.logEvent("error", `Failed to delete server attachment for "${filePath}": HTTP ${res.status}`);
-              errors.push(`Failed to delete server attachment for "${filePath}": HTTP ${res.status}`);
+              this.logEvent("error", `Failed to delete server attachment for "${filePathNormalized}": HTTP ${res.status}`);
+              errors.push(`Failed to delete server attachment for "${filePathNormalized}": HTTP ${res.status}`);
             }
           } catch (err) {
-            this.logEvent("error", `Failed to delete server attachment for "${filePath}": ${err.message || err}`);
-            errors.push(`Failed to delete server attachment for "${filePath}": ${err.message || err}`);
+            this.logEvent("error", `Failed to delete server attachment for "${filePathNormalized}": ${err.message || err}`);
+            errors.push(`Failed to delete server attachment for "${filePathNormalized}": ${err.message || err}`);
           }
           delete this.settings.syncHashes[filePath];
         }
       }
       const serverDocIds = new Set(serverDocs.map((d) => d.id));
-      const serverAttachPaths = new Set(serverAttachments.map((a) => a.filepath.toLowerCase()));
+      const serverAttachPaths = new Set(serverAttachments.map((a) => a.filepath.normalize("NFC").toLowerCase()));
       for (const [filePath, docId] of Object.entries(this.settings.fileMappings)) {
+        const filePathNormalized = filePath.normalize("NFC");
         if (!serverDocIds.has(docId)) {
-          const localFile = localSyncableMap.get(filePath.toLowerCase());
+          const localFile = localSyncableMap.get(filePathNormalized.toLowerCase());
           if (localFile && this.app.vault.getAbstractFileByPath(localFile.path)) {
             try {
               const localContent = await this.app.vault.read(localFile);
@@ -11570,30 +11604,30 @@ ${localContent}
               const lastSyncedHash = this.settings.syncHashes[docId];
               const localChanged = localHash !== lastSyncedHash;
               if (localChanged) {
-                this.logEvent("warn", `Document "${filePath}" was deleted on server but has local changes. Re-uploading...`);
+                this.logEvent("warn", `Document "${filePathNormalized}" was deleted on server but has local changes. Re-uploading...`);
                 delete this.settings.fileMappings[filePath];
                 delete this.settings.syncHashes[docId];
                 delete this.settings.syncVersions[docId];
                 continue;
               }
-              console.log(`CoSync: Document "${filePath}" was deleted on server. Deleting locally...`);
+              console.log(`CoSync: Document "${filePathNormalized}" was deleted on server. Deleting locally...`);
               this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(filePath);
+              this.addProgrammedModification(filePathNormalized);
               try {
                 await this.app.vault.delete(localFile);
                 deletedCount++;
-                filesDeletedDuringSync.add(filePath);
-                this.logEvent("info", `Deleted local note "${filePath}" (synced server deletion)`);
+                filesDeletedDuringSync.add(filePathNormalized);
+                this.logEvent("info", `Deleted local note "${filePathNormalized}" (synced server deletion)`);
               } catch (err) {
-                this.programmedModifications.delete(filePath);
-                this.logEvent("error", `Failed to delete local document "${filePath}": ${err.message || err}`);
-                errors.push(`Failed to delete local document "${filePath}": ${err.message || err}`);
+                this.deleteProgrammedModification(filePathNormalized);
+                this.logEvent("error", `Failed to delete local document "${filePathNormalized}": ${err.message || err}`);
+                errors.push(`Failed to delete local document "${filePathNormalized}": ${err.message || err}`);
               } finally {
                 this.isApplyingRemoteUpdate = false;
               }
             } catch (err) {
-              this.logEvent("error", `Error reading local document "${filePath}" during deletion sync: ${err.message || err}`);
-              errors.push(`Error reading local document "${filePath}": ${err.message || err}`);
+              this.logEvent("error", `Error reading local document "${filePathNormalized}" during deletion sync: ${err.message || err}`);
+              errors.push(`Error reading local document "${filePathNormalized}": ${err.message || err}`);
             }
           }
           delete this.settings.fileMappings[filePath];
@@ -11602,31 +11636,32 @@ ${localContent}
         }
       }
       for (const [filePath, lastHash] of Object.entries(this.settings.syncHashes)) {
-        const isMarkdown = filePath.endsWith(".md") && !filePath.toLowerCase().endsWith(".excalidraw.md") || filePath.endsWith(".txt") || filePath.startsWith("doc_") || filePath.startsWith("obs-");
-        if (!isMarkdown && !serverAttachPaths.has(filePath.toLowerCase())) {
-          const localFile = localBinaryMap.get(filePath.toLowerCase());
+        const filePathNormalized = filePath.normalize("NFC");
+        const isMarkdown = filePathNormalized.endsWith(".md") && !filePathNormalized.toLowerCase().endsWith(".excalidraw.md") || filePathNormalized.endsWith(".txt") || filePathNormalized.startsWith("doc_") || filePathNormalized.startsWith("obs-");
+        if (!isMarkdown && !serverAttachPaths.has(filePathNormalized.toLowerCase())) {
+          const localFile = localBinaryMap.get(filePathNormalized.toLowerCase());
           if (localFile && this.app.vault.getAbstractFileByPath(localFile.path)) {
             try {
-              const localBuffer = await this.readLocalBinary(filePath);
+              const localBuffer = await this.readLocalBinary(filePathNormalized);
               const localHash = getBinaryHash(localBuffer);
               const localChanged = localHash !== lastHash;
               if (localChanged) {
-                this.logEvent("warn", `Attachment "${filePath}" was deleted on server but has local changes. Re-uploading...`);
+                this.logEvent("warn", `Attachment "${filePathNormalized}" was deleted on server but has local changes. Re-uploading...`);
                 delete this.settings.syncHashes[filePath];
                 continue;
               }
-              console.log(`CoSync: Attachment "${filePath}" was deleted on server. Deleting locally...`);
+              console.log(`CoSync: Attachment "${filePathNormalized}" was deleted on server. Deleting locally...`);
               this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(filePath);
+              this.addProgrammedModification(filePathNormalized);
               try {
-                await this.deleteLocalFile(filePath, localFile);
+                await this.deleteLocalFile(filePathNormalized, localFile);
                 deletedCount++;
-                filesDeletedDuringSync.add(filePath);
-                this.logEvent("info", `Deleted local attachment "${filePath}" (synced server deletion)`);
+                filesDeletedDuringSync.add(filePathNormalized);
+                this.logEvent("info", `Deleted local attachment "${filePathNormalized}" (synced server deletion)`);
               } catch (err) {
-                this.programmedModifications.delete(filePath);
-                this.logEvent("error", `Failed to delete local attachment "${filePath}": ${err.message || err}`);
-                errors.push(`Failed to delete local attachment "${filePath}": ${err.message || err}`);
+                this.deleteProgrammedModification(filePathNormalized);
+                this.logEvent("error", `Failed to delete local attachment "${filePathNormalized}": ${err.message || err}`);
+                errors.push(`Failed to delete local attachment "${filePathNormalized}": ${err.message || err}`);
               } finally {
                 this.isApplyingRemoteUpdate = false;
               }
@@ -11640,13 +11675,14 @@ ${localContent}
       }
       await this.saveData(this.settings);
       for (let file of localSyncable) {
-        if (file.path === "cosync-sync-log.md") continue;
+        if (file.path.normalize("NFC") === "cosync-sync-log.md") continue;
         if (!this.app.vault.getAbstractFileByPath(file.path)) {
           continue;
         }
+        let normalizedFilePath = file.path.normalize("NFC");
         const isMarkdown = file.extension.toLowerCase() === "md";
-        const title = isMarkdown ? file.path.endsWith(".md") ? file.path.slice(0, -3) : file.path : file.path;
-        let docId = this.settings.fileMappings[file.path];
+        const title = isMarkdown ? normalizedFilePath.endsWith(".md") ? normalizedFilePath.slice(0, -3) : normalizedFilePath : normalizedFilePath;
+        let docId = this.settings.fileMappings[normalizedFilePath];
         if (!docId && isMarkdown) {
           const cache = this.app.metadataCache.getFileCache(file);
           docId = cache?.frontmatter?.["cosyncId"];
@@ -11655,9 +11691,9 @@ ${localContent}
         let matchedServerDoc = existsOnServer ? serverDocIdMap.get(docId) : serverDocTitleMap.get(title.trim().toLowerCase());
         if (matchedServerDoc) {
           docId = matchedServerDoc.id;
-          const expectedPath = isMarkdown ? matchedServerDoc.title.endsWith(".md") ? matchedServerDoc.title : `${matchedServerDoc.title}.md` : matchedServerDoc.title;
-          if (expectedPath.toLowerCase() !== file.path.toLowerCase()) {
-            console.log(`CoSync: Document path changed on server from "${file.path}" to "${expectedPath}". Renaming locally...`);
+          const expectedPath = (isMarkdown ? matchedServerDoc.title.endsWith(".md") ? matchedServerDoc.title : `${matchedServerDoc.title}.md` : matchedServerDoc.title).normalize("NFC");
+          if (expectedPath.toLowerCase() !== normalizedFilePath.toLowerCase()) {
+            console.log(`CoSync: Document path changed on server from "${normalizedFilePath}" to "${expectedPath}". Renaming locally...`);
             const parts = expectedPath.split("/");
             if (parts.length > 1) {
               let current = "";
@@ -11669,28 +11705,29 @@ ${localContent}
               }
             }
             this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(expectedPath);
-            this.programmedModifications.add(file.path);
+            this.addProgrammedModification(expectedPath);
+            this.addProgrammedModification(normalizedFilePath);
             try {
               await this.app.vault.rename(file, expectedPath);
-              this.logEvent("info", `Renamed local note "${file.path}" to "${expectedPath}" (synced server rename)`);
-              delete this.settings.fileMappings[file.path];
+              this.logEvent("info", `Renamed local note "${normalizedFilePath}" to "${expectedPath}" (synced server rename)`);
+              delete this.settings.fileMappings[normalizedFilePath];
               this.settings.fileMappings[expectedPath] = docId;
               await this.saveData(this.settings);
               const updatedFile = this.app.vault.getAbstractFileByPath(expectedPath);
               if (updatedFile instanceof import_obsidian.TFile) {
                 file = updatedFile;
+                normalizedFilePath = expectedPath;
               }
             } catch (err) {
-              this.programmedModifications.delete(expectedPath);
-              this.programmedModifications.delete(file.path);
+              this.deleteProgrammedModification(expectedPath);
+              this.deleteProgrammedModification(normalizedFilePath);
               console.error("CoSync: Error renaming local document to match server title:", err);
-              errors.push(`Error renaming local document "${file.path}": ${err.message || err}`);
+              errors.push(`Error renaming local document "${normalizedFilePath}": ${err.message || err}`);
             } finally {
               this.isApplyingRemoteUpdate = false;
             }
           }
-          this.settings.fileMappings[file.path] = docId;
+          this.settings.fileMappings[normalizedFilePath] = docId;
           const localContent = await this.app.vault.read(file);
           const localHash = getContentHash(localContent);
           const lastSyncedHash = this.settings.syncHashes[docId];
@@ -11699,35 +11736,35 @@ ${localContent}
           const localChanged = localHash !== lastSyncedHash;
           const serverChanged = serverVersion > lastSyncedVersion;
           const activeMarkdownView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-          const isCurrentActiveMarkdownFile = activeMarkdownView && activeMarkdownView.file?.path === file.path;
+          const isCurrentActiveMarkdownFile = activeMarkdownView && activeMarkdownView.file?.path.normalize("NFC") === normalizedFilePath;
           if (isCurrentActiveMarkdownFile) {
             this.settings.syncVersions[docId] = serverVersion;
             await this.markDocumentSynced(docId, localContent, localHash);
             continue;
           }
           if (localChanged || serverChanged) {
-            console.log(`CoSync: Syncing background document "${file.path}" (localChanged=${localChanged}, serverChanged=${serverChanged})`);
+            console.log(`CoSync: Syncing background document "${normalizedFilePath}" (localChanged=${localChanged}, serverChanged=${serverChanged})`);
             try {
               const outcome = await this.reconcileBackgroundDoc(file, docId, isMarkdown, localContent, localHash, lastSyncedHash, serverVersion);
               if (outcome === "uploaded") {
                 uploadedCount++;
-                this.logEvent("success", `Uploaded modifications for note "${file.path}"`);
+                this.logEvent("success", `Uploaded modifications for note "${normalizedFilePath}"`);
               } else if (outcome === "downloaded") {
                 downloadedCount++;
-                this.logEvent("success", `Downloaded modifications for note "${file.path}"`);
+                this.logEvent("success", `Downloaded modifications for note "${normalizedFilePath}"`);
               } else if (outcome === "merged") {
                 uploadedCount++;
                 downloadedCount++;
                 reconciledCount++;
-                this.logEvent("success", `Merged conflicts for note "${file.path}"`);
+                this.logEvent("success", `Merged conflicts for note "${normalizedFilePath}"`);
               }
             } catch (err) {
-              this.logEvent("error", `Failed to sync document "${file.path}": ${err.message || err}`);
-              errors.push(`Failed to sync document "${file.path}": ${err.message || err}`);
+              this.logEvent("error", `Failed to sync document "${normalizedFilePath}": ${err.message || err}`);
+              errors.push(`Failed to sync document "${normalizedFilePath}": ${err.message || err}`);
             }
           }
         } else {
-          console.log(`CoSync: Uploading new local document "${file.path}" to server...`);
+          console.log(`CoSync: Uploading new local document "${normalizedFilePath}" to server...`);
           const fileContent = await this.app.vault.read(file);
           try {
             const createResponse = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents`, {
@@ -11742,16 +11779,16 @@ ${localContent}
               const newDoc = await createResponse.json();
               const newDocId = newDoc.id;
               this.serverDocsCache = null;
-              this.settings.fileMappings[file.path] = newDocId;
-              this.logEvent("success", `Uploaded new note "${file.path}"`);
+              this.settings.fileMappings[normalizedFilePath] = newDocId;
+              this.logEvent("success", `Uploaded new note "${normalizedFilePath}"`);
               const contentWithId = isMarkdown ? stripCosyncId(fileContent) : fileContent;
               if (isMarkdown && contentWithId !== fileContent) {
                 this.isApplyingRemoteUpdate = true;
-                this.programmedModifications.add(file.path);
+                this.addProgrammedModification(normalizedFilePath);
                 try {
                   await this.app.vault.modify(file, contentWithId);
                 } catch (e) {
-                  this.programmedModifications.delete(file.path);
+                  this.deleteProgrammedModification(normalizedFilePath);
                 } finally {
                   this.isApplyingRemoteUpdate = false;
                 }
@@ -11760,19 +11797,20 @@ ${localContent}
               this.settings.syncVersions[newDocId] = 0;
               uploadedCount++;
             } else {
-              this.logEvent("error", `Failed to upload local document "${file.path}": HTTP ${createResponse.status}`);
-              errors.push(`Failed to upload local document "${file.path}": HTTP ${createResponse.status}`);
+              this.logEvent("error", `Failed to upload local document "${normalizedFilePath}": HTTP ${createResponse.status}`);
+              errors.push(`Failed to upload local document "${normalizedFilePath}": HTTP ${createResponse.status}`);
             }
           } catch (err) {
-            this.logEvent("error", `Failed to upload local document "${file.path}": ${err.message || err}`);
-            errors.push(`Failed to upload local document "${file.path}": ${err.message || err}`);
+            this.logEvent("error", `Failed to upload local document "${normalizedFilePath}": ${err.message || err}`);
+            errors.push(`Failed to upload local document "${normalizedFilePath}": ${err.message || err}`);
           }
         }
       }
       for (const doc2 of serverDocs) {
         const isMapped = Object.values(this.settings.fileMappings).includes(doc2.id);
         if (!isMapped) {
-          const lowerTitle = doc2.title.toLowerCase();
+          const docTitleNormalized = doc2.title.normalize("NFC");
+          const lowerTitle = docTitleNormalized.toLowerCase();
           const pathParts = lowerTitle.split("/");
           const fileName = pathParts[pathParts.length - 1];
           const fileParts = fileName.split(".");
@@ -11780,7 +11818,7 @@ ${localContent}
           if (ext && !SYNCABLE_EXTENSIONS.has(ext)) {
             continue;
           }
-          let expectedPath = doc2.title;
+          let expectedPath = docTitleNormalized;
           let isMarkdown = false;
           if (ext === "txt") {
             isMarkdown = false;
@@ -11792,18 +11830,18 @@ ${localContent}
           }
           const fileExists = localSyncableMap.has(expectedPath.toLowerCase());
           if (!fileExists) {
-            console.log(`CoSync: Document "${doc2.title}" is missing locally. Downloading...`);
+            console.log(`CoSync: Document "${docTitleNormalized}" is missing locally. Downloading...`);
             try {
               await this.downloadNewDocFromServer(doc2.id, expectedPath, isMarkdown);
               downloadedCount++;
               this.logEvent("success", `Downloaded missing note "${expectedPath}"`);
             } catch (err) {
-              this.logEvent("error", `Failed to download server document "${doc2.title}": ${err.message || err}`);
-              errors.push(`Failed to download server document "${doc2.title}": ${err.message || err}`);
+              this.logEvent("error", `Failed to download server document "${docTitleNormalized}": ${err.message || err}`);
+              errors.push(`Failed to download server document "${docTitleNormalized}": ${err.message || err}`);
             }
           } else {
             const matchedFile = localSyncableMap.get(expectedPath.toLowerCase());
-            this.settings.fileMappings[matchedFile.path] = doc2.id;
+            this.settings.fileMappings[matchedFile.path.normalize("NFC")] = doc2.id;
           }
         }
       }
@@ -11812,19 +11850,20 @@ ${localContent}
           continue;
         }
         try {
-          const cooldownTime = this.downloadedFilesCooldown.get(file.path.toLowerCase());
+          const normalizedFilePath = file.path.normalize("NFC");
+          const cooldownTime = this.downloadedFilesCooldown.get(normalizedFilePath.toLowerCase());
           if (cooldownTime && Date.now() - cooldownTime < 4e3) {
-            console.log(`CoSync: Skipping upload of recently downloaded file under cooldown: ${file.path}`);
+            console.log(`CoSync: Skipping upload of recently downloaded file under cooldown: ${normalizedFilePath}`);
             continue;
           }
-          const localBuffer = await this.readLocalBinary(file.path);
+          const localBuffer = await this.readLocalBinary(normalizedFilePath);
           const localHash = getBinaryHash(localBuffer);
-          const lastSyncedHash = this.settings.syncHashes[file.path];
-          const serverAttach = serverAttachMap.get(file.path.toLowerCase());
+          const lastSyncedHash = this.settings.syncHashes[normalizedFilePath];
+          const serverAttach = serverAttachMap.get(normalizedFilePath.toLowerCase());
           if (!serverAttach || serverAttach.hash !== localHash || localHash !== lastSyncedHash) {
-            console.log(`CoSync: Uploading background attachment "${file.path}" (size=${localBuffer.byteLength} bytes)...`);
+            console.log(`CoSync: Uploading background attachment "${normalizedFilePath}" (size=${localBuffer.byteLength} bytes)...`);
             const uploadRes = await fetch(
-              `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(file.path)}&hash=${localHash}`,
+              `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(normalizedFilePath)}&hash=${localHash}`,
               {
                 method: "PUT",
                 headers: {
@@ -11835,26 +11874,28 @@ ${localContent}
               }
             );
             if (uploadRes.ok) {
-              this.settings.syncHashes[file.path] = localHash;
+              this.settings.syncHashes[normalizedFilePath] = localHash;
               uploadedCount++;
-              this.logEvent("success", `Uploaded attachment "${file.path}"`);
+              this.logEvent("success", `Uploaded attachment "${normalizedFilePath}"`);
             } else {
-              this.logEvent("error", `Failed to upload attachment "${file.path}": HTTP ${uploadRes.status}`);
-              errors.push(`Failed to upload attachment "${file.path}": HTTP ${uploadRes.status}`);
+              this.logEvent("error", `Failed to upload attachment "${normalizedFilePath}": HTTP ${uploadRes.status}`);
+              errors.push(`Failed to upload attachment "${normalizedFilePath}": HTTP ${uploadRes.status}`);
             }
           }
         } catch (err) {
-          this.logEvent("error", `Failed to upload attachment "${file.path}": ${err.message || err}`);
-          errors.push(`Failed to upload attachment "${file.path}": ${err.message || err}`);
+          const normalizedFilePath = file.path.normalize("NFC");
+          this.logEvent("error", `Failed to upload attachment "${normalizedFilePath}": ${err.message || err}`);
+          errors.push(`Failed to upload attachment "${normalizedFilePath}": ${err.message || err}`);
         }
       }
       for (const attach of serverAttachments) {
         try {
-          const localFile = localBinaryMap.get(attach.filepath.toLowerCase());
-          const lastSyncedHash = this.settings.syncHashes[attach.filepath];
+          const normalizedAttachPath = attach.filepath.normalize("NFC");
+          const localFile = localBinaryMap.get(normalizedAttachPath.toLowerCase());
+          const lastSyncedHash = this.settings.syncHashes[normalizedAttachPath];
           if (!localFile || attach.hash !== lastSyncedHash) {
-            console.log(`CoSync: Downloading background attachment "${attach.filepath}" (size=${attach.size} bytes)...`);
-            const pathParts = attach.filepath.split("/");
+            console.log(`CoSync: Downloading background attachment "${normalizedAttachPath}" (size=${attach.size} bytes)...`);
+            const pathParts = normalizedAttachPath.split("/");
             if (pathParts.length > 1) {
               let currentFolderPath = "";
               for (let i = 0; i < pathParts.length - 1; i++) {
@@ -11866,7 +11907,7 @@ ${localContent}
               }
             }
             const downloadRes = await fetch(
-              `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/download?filepath=${encodeURIComponent(attach.filepath)}`,
+              `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/download?filepath=${encodeURIComponent(normalizedAttachPath)}`,
               {
                 headers: {
                   "Authorization": `Bearer ${this.settings.token}`
@@ -11876,17 +11917,17 @@ ${localContent}
             if (downloadRes.ok) {
               const arrayBuffer = await downloadRes.arrayBuffer();
               this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(attach.filepath);
+              this.addProgrammedModification(normalizedAttachPath);
               try {
-                await this.writeLocalBinary(attach.filepath, arrayBuffer);
-                this.logEvent("success", `Downloaded ${localFile ? "modified" : "missing"} attachment "${attach.filepath}"`);
-                this.settings.syncHashes[attach.filepath] = attach.hash;
-                this.downloadedFilesCooldown.set(attach.filepath.toLowerCase(), Date.now());
+                await this.writeLocalBinary(normalizedAttachPath, arrayBuffer);
+                this.logEvent("success", `Downloaded ${localFile ? "modified" : "missing"} attachment "${normalizedAttachPath}"`);
+                this.settings.syncHashes[normalizedAttachPath] = attach.hash;
+                this.downloadedFilesCooldown.set(normalizedAttachPath.toLowerCase(), Date.now());
                 downloadedCount++;
               } catch (e) {
-                this.programmedModifications.delete(attach.filepath);
-                this.logEvent("error", `Failed to write binary file "${attach.filepath}": ${e.message || e}`);
-                errors.push(`Failed to write binary file "${attach.filepath}": ${e.message || e}`);
+                this.deleteProgrammedModification(normalizedAttachPath);
+                this.logEvent("error", `Failed to write binary file "${normalizedAttachPath}": ${e.message || e}`);
+                errors.push(`Failed to write binary file "${normalizedAttachPath}": ${e.message || e}`);
               } finally {
                 this.isApplyingRemoteUpdate = false;
               }
@@ -12142,6 +12183,7 @@ ${localContent}
     });
   }
   async downloadNewDocFromServer(docId, filepath, isMarkdown) {
+    const normalizedPath = filepath.normalize("NFC");
     const wsUrl = this.settings.serverUrl.replace(/^http/, "ws");
     const roomName = `workspace/${this.settings.workspaceId}/doc/${docId}`;
     const tempYDoc = new Doc();
@@ -12161,7 +12203,7 @@ ${localContent}
         if (isSynced) {
           clearTimeout(timeout);
           const fileContent = ytext.toString();
-          const pathParts = filepath.split("/");
+          const pathParts = normalizedPath.split("/");
           if (pathParts.length > 1) {
             let currentFolderPath = "";
             for (let i = 0; i < pathParts.length - 1; i++) {
@@ -12174,15 +12216,15 @@ ${localContent}
           }
           const initialText = isMarkdown ? stripCosyncId(fileContent) : fileContent;
           this.isApplyingRemoteUpdate = true;
-          this.programmedModifications.add(filepath);
+          this.addProgrammedModification(normalizedPath);
           try {
-            await this.app.vault.create(filepath, initialText);
+            await this.app.vault.create(normalizedPath, initialText);
             const newHash = getContentHash(initialText);
             await this.markDocumentSynced(docId, initialText, newHash);
-            this.settings.fileMappings[filepath] = docId;
+            this.settings.fileMappings[normalizedPath] = docId;
           } catch (err) {
-            this.programmedModifications.delete(filepath);
-            console.error(`Failed to create new downloaded note ${filepath}`, err);
+            this.deleteProgrammedModification(normalizedPath);
+            console.error(`Failed to create new downloaded note ${normalizedPath}`, err);
           } finally {
             this.isApplyingRemoteUpdate = false;
           }
