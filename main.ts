@@ -1106,6 +1106,11 @@ class CoSyncPlugin extends Plugin {
         const localHash = getContentHash(localContent);
         const lastSyncedHash = this.settings.syncHashes[documentId];
 
+        if (localContent === serverContentWithId) {
+          await this.markDocumentSynced(documentId, localContent, localHash);
+          return;
+        }
+
         // If Yjs is already active/bound, let live sync handle everything.
         if (this.boundEditorView) {
           await this.markDocumentSynced(documentId, serverContentWithId, serverHash);
@@ -1169,7 +1174,7 @@ class CoSyncPlugin extends Plugin {
             console.log(`CoSync: Conflict detected on "${file.path}"! Attempting automated 3-way merge...`);
             const baseText = await this.readBaseText(documentId);
             
-            if (baseText !== null) {
+            if (baseText !== null && baseText !== '') {
               // Perform CRDT 3-way merge using Yjs and applyDiff
               this.ydoc.transact(() => {
                 applyDiff(ytext, baseText, localContent);
@@ -2169,10 +2174,15 @@ class CoSyncPlugin extends Plugin {
                 this.settings.syncVersions[docId] = serverVersion;
               }
             } else {
-              const localChanged = localHash !== lastSyncedHash;
-              const serverChanged = serverHash !== lastSyncedHash;
+              if (localContent === serverContentWithId) {
+                await this.markDocumentSynced(docId, localContent, localHash);
+                this.settings.syncVersions[docId] = serverVersion;
+                outcome = 'none';
+              } else {
+                const localChanged = localHash !== lastSyncedHash;
+                const serverChanged = serverHash !== lastSyncedHash;
 
-              if (localChanged && !serverChanged) {
+                if (localChanged && !serverChanged) {
                 tempYDoc.transact(() => {
                   updateYTextCleanly(ytext, localContent);
                 }, 'local-reconciliation-upload');
@@ -2197,7 +2207,7 @@ class CoSyncPlugin extends Plugin {
                 console.log(`CoSync: Conflict detected on background file "${file.path}"! Attempting automated 3-way merge...`);
                 const baseText = await this.readBaseText(docId);
 
-                if (baseText !== null) {
+                if (baseText !== null && baseText !== '') {
                   tempYDoc.transact(() => {
                     applyDiff(ytext, baseText, localContent);
                   }, 'local-reconciliation-merge');
@@ -2248,7 +2258,8 @@ class CoSyncPlugin extends Plugin {
                 }
               }
             }
-          } catch (err) {
+          }
+        } catch (err) {
             tempWs.disconnect();
             tempWs.destroy();
             tempYDoc.destroy();

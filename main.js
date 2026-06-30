@@ -11219,6 +11219,10 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         const localContent = await this.app.vault.read(file);
         const localHash = getContentHash(localContent);
         const lastSyncedHash = this.settings.syncHashes[documentId];
+        if (localContent === serverContentWithId) {
+          await this.markDocumentSynced(documentId, localContent, localHash);
+          return;
+        }
         if (this.boundEditorView) {
           await this.markDocumentSynced(documentId, serverContentWithId, serverHash);
           return;
@@ -11271,7 +11275,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           } else if (localChanged && serverChanged) {
             console.log(`CoSync: Conflict detected on "${file.path}"! Attempting automated 3-way merge...`);
             const baseText = await this.readBaseText(documentId);
-            if (baseText !== null) {
+            if (baseText !== null && baseText !== "") {
               this.ydoc.transact(() => {
                 applyDiff(ytext, baseText, localContent);
               }, "local-reconciliation-merge");
@@ -12127,78 +12131,84 @@ ${localContent}
                 this.settings.syncVersions[docId] = serverVersion;
               }
             } else {
-              const localChanged = localHash !== lastSyncedHash;
-              const serverChanged = serverHash !== lastSyncedHash;
-              if (localChanged && !serverChanged) {
-                tempYDoc.transact(() => {
-                  updateYTextCleanly(ytext, localContent);
-                }, "local-reconciliation-upload");
+              if (localContent === serverContentWithId) {
                 await this.markDocumentSynced(docId, localContent, localHash);
                 this.settings.syncVersions[docId] = serverVersion;
-                outcome = "uploaded";
-              } else if (!localChanged && serverChanged) {
-                this.isApplyingRemoteUpdate = true;
-                this.addProgrammedModification(file.path);
-                try {
-                  await this.app.vault.modify(file, serverContentWithId);
-                  outcome = "downloaded";
-                } catch (e) {
-                  this.deleteProgrammedModification(file.path);
-                  throw e;
-                } finally {
-                  this.isApplyingRemoteUpdate = false;
-                }
-                await this.markDocumentSynced(docId, serverContentWithId, serverHash);
-                this.settings.syncVersions[docId] = serverVersion;
-              } else if (localChanged && serverChanged) {
-                console.log(`CoSync: Conflict detected on background file "${file.path}"! Attempting automated 3-way merge...`);
-                const baseText = await this.readBaseText(docId);
-                if (baseText !== null) {
+                outcome = "none";
+              } else {
+                const localChanged = localHash !== lastSyncedHash;
+                const serverChanged = serverHash !== lastSyncedHash;
+                if (localChanged && !serverChanged) {
                   tempYDoc.transact(() => {
-                    applyDiff(ytext, baseText, localContent);
-                  }, "local-reconciliation-merge");
-                  const mergedContent = ytext.toString();
-                  const mergedContentWithId = isMarkdown ? stripCosyncId(mergedContent) : mergedContent;
-                  const mergedHash = getContentHash(mergedContentWithId);
+                    updateYTextCleanly(ytext, localContent);
+                  }, "local-reconciliation-upload");
+                  await this.markDocumentSynced(docId, localContent, localHash);
+                  this.settings.syncVersions[docId] = serverVersion;
+                  outcome = "uploaded";
+                } else if (!localChanged && serverChanged) {
                   this.isApplyingRemoteUpdate = true;
                   this.addProgrammedModification(file.path);
                   try {
-                    await this.app.vault.modify(file, mergedContentWithId);
-                    outcome = "merged";
+                    await this.app.vault.modify(file, serverContentWithId);
+                    outcome = "downloaded";
                   } catch (e) {
                     this.deleteProgrammedModification(file.path);
                     throw e;
                   } finally {
                     this.isApplyingRemoteUpdate = false;
                   }
-                  await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
+                  await this.markDocumentSynced(docId, serverContentWithId, serverHash);
                   this.settings.syncVersions[docId] = serverVersion;
-                  console.log(`CoSync: Automatically merged background changes successfully.`);
-                } else {
-                  console.log(`CoSync: No base text cache found for background file. Appending local version.`);
-                  const separator = `
+                } else if (localChanged && serverChanged) {
+                  console.log(`CoSync: Conflict detected on background file "${file.path}"! Attempting automated 3-way merge...`);
+                  const baseText = await this.readBaseText(docId);
+                  if (baseText !== null && baseText !== "") {
+                    tempYDoc.transact(() => {
+                      applyDiff(ytext, baseText, localContent);
+                    }, "local-reconciliation-merge");
+                    const mergedContent = ytext.toString();
+                    const mergedContentWithId = isMarkdown ? stripCosyncId(mergedContent) : mergedContent;
+                    const mergedHash = getContentHash(mergedContentWithId);
+                    this.isApplyingRemoteUpdate = true;
+                    this.addProgrammedModification(file.path);
+                    try {
+                      await this.app.vault.modify(file, mergedContentWithId);
+                      outcome = "merged";
+                    } catch (e) {
+                      this.deleteProgrammedModification(file.path);
+                      throw e;
+                    } finally {
+                      this.isApplyingRemoteUpdate = false;
+                    }
+                    await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
+                    this.settings.syncVersions[docId] = serverVersion;
+                    console.log(`CoSync: Automatically merged background changes successfully.`);
+                  } else {
+                    console.log(`CoSync: No base text cache found for background file. Appending local version.`);
+                    const separator = `
 
 %% CoSync Conflict Merge Suffix %%
 ${localContent}
 `;
-                  const mergedContentWithId = serverContentWithId + separator;
-                  const mergedHash = getContentHash(mergedContentWithId);
-                  tempYDoc.transact(() => {
-                    updateYTextCleanly(ytext, mergedContentWithId);
-                  }, "local-reconciliation-merge-fallback");
-                  this.isApplyingRemoteUpdate = true;
-                  this.addProgrammedModification(file.path);
-                  try {
-                    await this.app.vault.modify(file, mergedContentWithId);
-                    outcome = "merged";
-                  } catch (e) {
-                    this.deleteProgrammedModification(file.path);
-                    throw e;
-                  } finally {
-                    this.isApplyingRemoteUpdate = false;
+                    const mergedContentWithId = serverContentWithId + separator;
+                    const mergedHash = getContentHash(mergedContentWithId);
+                    tempYDoc.transact(() => {
+                      updateYTextCleanly(ytext, mergedContentWithId);
+                    }, "local-reconciliation-merge-fallback");
+                    this.isApplyingRemoteUpdate = true;
+                    this.addProgrammedModification(file.path);
+                    try {
+                      await this.app.vault.modify(file, mergedContentWithId);
+                      outcome = "merged";
+                    } catch (e) {
+                      this.deleteProgrammedModification(file.path);
+                      throw e;
+                    } finally {
+                      this.isApplyingRemoteUpdate = false;
+                    }
+                    await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
+                    this.settings.syncVersions[docId] = serverVersion;
                   }
-                  await this.markDocumentSynced(docId, mergedContentWithId, mergedHash);
-                  this.settings.syncVersions[docId] = serverVersion;
                 }
               }
             }
