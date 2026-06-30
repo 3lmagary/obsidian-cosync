@@ -72,6 +72,8 @@ class CoSyncPlugin extends Plugin {
     return this.programmedModifications.has(path.normalize('NFC'));
   }
 
+  private currentSyncRunEvents: string[] | null = null;
+
   // In-memory cache for server documents to optimize performance and prevent duplicate requests
   private serverDocsCache: Array<{ id: string; title: string; updatedAt: string; version: number }> | null = null;
   private serverDocsCacheTime = 0;
@@ -103,6 +105,10 @@ class CoSyncPlugin extends Plugin {
       this.recentLogs.pop();
     }
     console.log(`CoSync [${level.toUpperCase()}]: ${message}`);
+    
+    if (this.currentSyncRunEvents) {
+      this.currentSyncRunEvents.push(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
+    }
     
     // Update open sidebar views
     const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
@@ -1402,6 +1408,7 @@ class CoSyncPlugin extends Plugin {
 
     this.isSyncing = true;
     this.logEvent('info', 'Starting vault synchronization...');
+    this.currentSyncRunEvents = [];
     this.updateStatusBar('syncing');
 
     let uploadedCount = 0;
@@ -1976,37 +1983,43 @@ class CoSyncPlugin extends Plugin {
 
       await this.saveData(this.settings);
       
-      // Write sync logs to cosync-sync-log.md
-      const timestamp = new Date().toLocaleString();
-      let logEntry = `### Sync Run: ${timestamp}\n`;
-      logEntry += `- **Status**: ${errors.length > 0 ? 'Completed with errors ⚠️' : 'Successful ✅'}\n`;
-      logEntry += `- **Files Uploaded**: ${uploadedCount}\n`;
-      logEntry += `- **Files Downloaded**: ${downloadedCount}\n`;
-      logEntry += `- **Files Deleted**: ${deletedCount}\n`;
-      logEntry += `- **Conflicts Reconciled**: ${reconciledCount}\n`;
-      if (errors.length > 0) {
-        logEntry += `- **Errors (${errors.length})**:\n`;
-        errors.forEach(err => {
-          logEntry += `  - \`${err}\`\n`;
-        });
-      }
-      
-      // Append detailed logs of events
-      if (this.recentLogs.length > 0) {
-        logEntry += `- **Detailed Events**:\n`;
-        this.recentLogs.slice(0, 20).forEach(l => {
-          logEntry += `  - [${l.timestamp}] [${l.level.toUpperCase()}] ${l.message}\n`;
-        });
-      }
-      logEntry += `\n---\n`;
+      const runEvents = this.currentSyncRunEvents || [];
 
-      const logPath = 'cosync-sync-log.md';
-      const logFile = this.app.vault.getAbstractFileByPath(logPath);
-      if (logFile instanceof TFile) {
-        const currentContent = await this.app.vault.read(logFile);
-        await this.app.vault.modify(logFile, logEntry + '\n' + currentContent);
-      } else {
-        await this.app.vault.create(logPath, `# CoSync Sync Logs\n\n` + logEntry);
+      const hasChanges = uploadedCount > 0 || downloadedCount > 0 || deletedCount > 0 || reconciledCount > 0 || errors.length > 0;
+      
+      if (hasChanges) {
+        // Write sync logs to cosync-sync-log.md
+        const timestamp = new Date().toLocaleString();
+        let logEntry = `### Sync Run: ${timestamp}\n`;
+        logEntry += `- **Status**: ${errors.length > 0 ? 'Completed with errors ⚠️' : 'Successful ✅'}\n`;
+        logEntry += `- **Files Uploaded**: ${uploadedCount}\n`;
+        logEntry += `- **Files Downloaded**: ${downloadedCount}\n`;
+        logEntry += `- **Files Deleted**: ${deletedCount}\n`;
+        logEntry += `- **Conflicts Reconciled**: ${reconciledCount}\n`;
+        if (errors.length > 0) {
+          logEntry += `- **Errors (${errors.length})**:\n`;
+          errors.forEach(err => {
+            logEntry += `  - \`${err}\`\n`;
+          });
+        }
+        
+        // Append detailed logs of events from this run
+        if (runEvents.length > 0) {
+          logEntry += `- **Detailed Events**:\n`;
+          runEvents.forEach(l => {
+            logEntry += `  - ${l}\n`;
+          });
+        }
+        logEntry += `\n---\n`;
+
+        const logPath = 'cosync-sync-log.md';
+        const logFile = this.app.vault.getAbstractFileByPath(logPath);
+        if (logFile instanceof TFile) {
+          const currentContent = await this.app.vault.read(logFile);
+          await this.app.vault.modify(logFile, logEntry + '\n' + currentContent);
+        } else {
+          await this.app.vault.create(logPath, `# CoSync Sync Logs\n\n` + logEntry);
+        }
       }
 
       // Clean empty folders if any files were deleted during sync
@@ -2041,10 +2054,18 @@ class CoSyncPlugin extends Plugin {
       this.logEvent('error', `Fatal sync error: ${err.message || err}`);
       errors.push(`Fatal sync error: ${err.message || err}`);
       
+      const runEvents = this.currentSyncRunEvents || [];
       const timestamp = new Date().toLocaleString();
       let logEntry = `### Sync Run: ${timestamp}\n`;
       logEntry += `- **Status**: Fatal Error ❌\n`;
-      logEntry += `- \`${err.message || err}\`\n\n---\n`;
+      logEntry += `- \`${err.message || err}\`\n`;
+      if (runEvents.length > 0) {
+        logEntry += `- **Detailed Events**:\n`;
+        runEvents.forEach(l => {
+          logEntry += `  - ${l}\n`;
+        });
+      }
+      logEntry += `\n---\n`;
 
       const logPath = 'cosync-sync-log.md';
       try {
@@ -2063,6 +2084,7 @@ class CoSyncPlugin extends Plugin {
       this.updateStatusBar('disconnected');
     } finally {
       this.isSyncing = false;
+      this.currentSyncRunEvents = null;
     }
   }
 

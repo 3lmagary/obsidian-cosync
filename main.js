@@ -10368,6 +10368,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.isApplyingRemoteUpdate = false;
     // Programmatic modifications tracker to prevent loopbacks from vault.modify events
     this.programmedModifications = /* @__PURE__ */ new Set();
+    this.currentSyncRunEvents = null;
     // In-memory cache for server documents to optimize performance and prevent duplicate requests
     this.serverDocsCache = null;
     this.serverDocsCacheTime = 0;
@@ -10404,6 +10405,9 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       this.recentLogs.pop();
     }
     console.log(`CoSync [${level.toUpperCase()}]: ${message}`);
+    if (this.currentSyncRunEvents) {
+      this.currentSyncRunEvents.push(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
+    }
     const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
     leaves.forEach((leaf) => {
       if (leaf.view instanceof CoSyncView) {
@@ -11457,6 +11461,7 @@ ${localContent}
     if (!this.settings.token || !this.settings.workspaceId) return;
     this.isSyncing = true;
     this.logEvent("info", "Starting vault synchronization...");
+    this.currentSyncRunEvents = [];
     this.updateStatusBar("syncing");
     let uploadedCount = 0;
     let downloadedCount = 0;
@@ -11942,47 +11947,51 @@ ${localContent}
         }
       }
       await this.saveData(this.settings);
-      const timestamp = (/* @__PURE__ */ new Date()).toLocaleString();
-      let logEntry = `### Sync Run: ${timestamp}
+      const runEvents = this.currentSyncRunEvents || [];
+      const hasChanges = uploadedCount > 0 || downloadedCount > 0 || deletedCount > 0 || reconciledCount > 0 || errors.length > 0;
+      if (hasChanges) {
+        const timestamp = (/* @__PURE__ */ new Date()).toLocaleString();
+        let logEntry = `### Sync Run: ${timestamp}
 `;
-      logEntry += `- **Status**: ${errors.length > 0 ? "Completed with errors \u26A0\uFE0F" : "Successful \u2705"}
+        logEntry += `- **Status**: ${errors.length > 0 ? "Completed with errors \u26A0\uFE0F" : "Successful \u2705"}
 `;
-      logEntry += `- **Files Uploaded**: ${uploadedCount}
+        logEntry += `- **Files Uploaded**: ${uploadedCount}
 `;
-      logEntry += `- **Files Downloaded**: ${downloadedCount}
+        logEntry += `- **Files Downloaded**: ${downloadedCount}
 `;
-      logEntry += `- **Files Deleted**: ${deletedCount}
+        logEntry += `- **Files Deleted**: ${deletedCount}
 `;
-      logEntry += `- **Conflicts Reconciled**: ${reconciledCount}
+        logEntry += `- **Conflicts Reconciled**: ${reconciledCount}
 `;
-      if (errors.length > 0) {
-        logEntry += `- **Errors (${errors.length})**:
+        if (errors.length > 0) {
+          logEntry += `- **Errors (${errors.length})**:
 `;
-        errors.forEach((err) => {
-          logEntry += `  - \`${err}\`
+          errors.forEach((err) => {
+            logEntry += `  - \`${err}\`
 `;
-        });
-      }
-      if (this.recentLogs.length > 0) {
-        logEntry += `- **Detailed Events**:
+          });
+        }
+        if (runEvents.length > 0) {
+          logEntry += `- **Detailed Events**:
 `;
-        this.recentLogs.slice(0, 20).forEach((l) => {
-          logEntry += `  - [${l.timestamp}] [${l.level.toUpperCase()}] ${l.message}
+          runEvents.forEach((l) => {
+            logEntry += `  - ${l}
 `;
-        });
-      }
-      logEntry += `
+          });
+        }
+        logEntry += `
 ---
 `;
-      const logPath = "cosync-sync-log.md";
-      const logFile = this.app.vault.getAbstractFileByPath(logPath);
-      if (logFile instanceof import_obsidian.TFile) {
-        const currentContent = await this.app.vault.read(logFile);
-        await this.app.vault.modify(logFile, logEntry + "\n" + currentContent);
-      } else {
-        await this.app.vault.create(logPath, `# CoSync Sync Logs
+        const logPath = "cosync-sync-log.md";
+        const logFile = this.app.vault.getAbstractFileByPath(logPath);
+        if (logFile instanceof import_obsidian.TFile) {
+          const currentContent = await this.app.vault.read(logFile);
+          await this.app.vault.modify(logFile, logEntry + "\n" + currentContent);
+        } else {
+          await this.app.vault.create(logPath, `# CoSync Sync Logs
 
 ` + logEntry);
+        }
       }
       if (filesDeletedDuringSync.size > 0) {
         await this.cleanEmptyFolders(filesDeletedDuringSync);
@@ -12011,13 +12020,23 @@ ${localContent}
     } catch (err) {
       this.logEvent("error", `Fatal sync error: ${err.message || err}`);
       errors.push(`Fatal sync error: ${err.message || err}`);
+      const runEvents = this.currentSyncRunEvents || [];
       const timestamp = (/* @__PURE__ */ new Date()).toLocaleString();
       let logEntry = `### Sync Run: ${timestamp}
 `;
       logEntry += `- **Status**: Fatal Error \u274C
 `;
       logEntry += `- \`${err.message || err}\`
-
+`;
+      if (runEvents.length > 0) {
+        logEntry += `- **Detailed Events**:
+`;
+        runEvents.forEach((l) => {
+          logEntry += `  - ${l}
+`;
+        });
+      }
+      logEntry += `
 ---
 `;
       const logPath = "cosync-sync-log.md";
@@ -12038,6 +12057,7 @@ ${localContent}
       this.updateStatusBar("disconnected");
     } finally {
       this.isSyncing = false;
+      this.currentSyncRunEvents = null;
     }
   }
   async reconcileBackgroundDoc(file, docId, isMarkdown, localContent, localHash, lastSyncedHash, serverVersion) {
