@@ -195,11 +195,11 @@ class CoSyncPlugin extends Plugin {
         if (file.path.startsWith('.')) return;
         if (file instanceof TFile) {
           if (file.path === 'cosync-sync-log.md') return;
-          if (this.isApplyingRemoteUpdate) return;
           if (this.programmedModifications.has(file.path)) {
             this.programmedModifications.delete(file.path);
             return;
           }
+          if (this.isApplyingRemoteUpdate) return;
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
           this.instantSyncTimeout = setTimeout(async () => {
             // 1. Process active note modification (if applicable)
@@ -223,11 +223,11 @@ class CoSyncPlugin extends Plugin {
       this.app.vault.on('create', (file) => {
         if (file.path.startsWith('.')) return;
         if (file.path === 'cosync-sync-log.md') return;
-        if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
         }
+        if (this.isApplyingRemoteUpdate) return;
         if (this.isSyncing) return;
         if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
         this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
@@ -239,11 +239,11 @@ class CoSyncPlugin extends Plugin {
       this.app.vault.on('delete', (file) => {
         if (file.path.startsWith('.')) return;
         if (file.path === 'cosync-sync-log.md') return;
-        if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
         }
+        if (this.isApplyingRemoteUpdate) return;
         if (this.isSyncing) return;
         if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
         this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
@@ -253,6 +253,18 @@ class CoSyncPlugin extends Plugin {
     // Monitor file renames/moves to keep mappings up to date and trigger instant sync
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
+        // Consume programmed modifications flags first
+        let isProgrammed = false;
+        if (this.programmedModifications.has(file.path)) {
+          this.programmedModifications.delete(file.path);
+          isProgrammed = true;
+        }
+        if (this.programmedModifications.has(oldPath)) {
+          this.programmedModifications.delete(oldPath);
+          isProgrammed = true;
+        }
+        if (isProgrammed) return;
+
         let changed = false;
         if (file instanceof TFile) {
           if (this.settings.fileMappings?.[oldPath]) {

@@ -10467,11 +10467,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         if (file.path.startsWith(".")) return;
         if (file instanceof import_obsidian.TFile) {
           if (file.path === "cosync-sync-log.md") return;
-          if (this.isApplyingRemoteUpdate) return;
           if (this.programmedModifications.has(file.path)) {
             this.programmedModifications.delete(file.path);
             return;
           }
+          if (this.isApplyingRemoteUpdate) return;
           if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
           this.instantSyncTimeout = setTimeout(async () => {
             await this.handleExternalModification(file);
@@ -10489,11 +10489,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       this.app.vault.on("create", (file) => {
         if (file.path.startsWith(".")) return;
         if (file.path === "cosync-sync-log.md") return;
-        if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
         }
+        if (this.isApplyingRemoteUpdate) return;
         if (this.isSyncing) return;
         if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
         this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
@@ -10503,11 +10503,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       this.app.vault.on("delete", (file) => {
         if (file.path.startsWith(".")) return;
         if (file.path === "cosync-sync-log.md") return;
-        if (this.isApplyingRemoteUpdate) return;
         if (this.programmedModifications.has(file.path)) {
           this.programmedModifications.delete(file.path);
           return;
         }
+        if (this.isApplyingRemoteUpdate) return;
         if (this.isSyncing) return;
         if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
         this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
@@ -10515,6 +10515,16 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
+        let isProgrammed = false;
+        if (this.programmedModifications.has(file.path)) {
+          this.programmedModifications.delete(file.path);
+          isProgrammed = true;
+        }
+        if (this.programmedModifications.has(oldPath)) {
+          this.programmedModifications.delete(oldPath);
+          isProgrammed = true;
+        }
+        if (isProgrammed) return;
         let changed = false;
         if (file instanceof import_obsidian.TFile) {
           if (this.settings.fileMappings?.[oldPath]) {
