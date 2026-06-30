@@ -11,7 +11,7 @@
 
 .cm-ySelectionCaret {
   position: relative;
-  border-left: 2px solid !important;
+  border-left: 2px solid;
   border-right: none;
   margin-left: -1px;
   margin-right: -1px;
