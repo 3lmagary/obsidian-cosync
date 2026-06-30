@@ -74,6 +74,25 @@ class CoSyncPlugin extends Plugin {
 
   private currentSyncRunEvents: string[] | null = null;
 
+  private updateSidebarViews() {
+    const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
+    leaves.forEach(leaf => {
+      if (leaf.view instanceof CoSyncView) {
+        leaf.view.render();
+      }
+    });
+  }
+
+  private verifyActiveFileMapping() {
+    if (!this.activeFile) return;
+    const activePath = this.activeFile.path.normalize('NFC');
+    const mappedId = this.settings.fileMappings[activePath];
+    if (mappedId && mappedId !== this.activeDocumentId) {
+      console.log(`CoSync: Active file document ID changed to ${mappedId}. Reconnecting...`);
+      this.reconnect();
+    }
+  }
+
   // In-memory cache for server documents to optimize performance and prevent duplicate requests
   private serverDocsCache: Array<{ id: string; title: string; updatedAt: string; version: number }> | null = null;
   private serverDocsCacheTime = 0;
@@ -111,12 +130,7 @@ class CoSyncPlugin extends Plugin {
     }
     
     // Update open sidebar views
-    const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
-    leaves.forEach(leaf => {
-      if (leaf.view instanceof CoSyncView) {
-        leaf.view.render();
-      }
-    });
+    this.updateSidebarViews();
   }
 
   private updateStatusBar(status: 'connected' | 'connecting' | 'disconnected' | 'syncing', customText?: string) {
@@ -675,7 +689,7 @@ class CoSyncPlugin extends Plugin {
     if (!this.ydoc || !this.wsProvider || !this.activeFile) return;
 
     const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (activeView && activeView.file?.path === this.activeFile.path) {
+    if (activeView && activeView.file?.path.normalize('NFC') === this.activeFile.path.normalize('NFC')) {
       const editor = activeView.editor as any;
       if (editor && editor.cm) {
         const cmView = editor.cm as EditorView;
@@ -1030,12 +1044,14 @@ class CoSyncPlugin extends Plugin {
     this.updateStatusBar('connecting');
     this.wsProvider.on('status', ({ status }) => {
       this.updateStatusBar(status as any);
+      this.updateSidebarViews();
     });
 
     this.wsProvider.on('sync', (isSynced) => {
       if (isSynced) {
         console.log('CoSync: Collaborative room synced. Binding to editor.');
         this.bindYjsToEditor();
+        this.updateSidebarViews();
       }
     });
 
@@ -1051,7 +1067,7 @@ class CoSyncPlugin extends Plugin {
     });
 
     this.wsProvider.awareness.on('change', () => {
-      // Awareness state changed (collaborators joined/left) — no UI to update
+      this.updateSidebarViews();
     });
 
 
@@ -1065,7 +1081,7 @@ class CoSyncPlugin extends Plugin {
       // Dynamic debounce: write faster (100ms) if the user is not actively editing in Obsidian (unfocused),
       // and use a safe longer delay (1500ms) if focused to prevent interrupting active input.
       const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-      const isFocused = activeView && activeView.file?.path === this.activeFile?.path && activeView.editor?.hasFocus();
+      const isFocused = activeView && activeView.file?.path.normalize('NFC') === this.activeFile?.path.normalize('NFC') && activeView.editor?.hasFocus();
       const debounceDelay = isFocused ? 1500 : 100;
 
       this.syncTimeout = setTimeout(async () => {
@@ -1982,6 +1998,8 @@ class CoSyncPlugin extends Plugin {
       }
 
       await this.saveData(this.settings);
+      this.verifyActiveFileMapping();
+      this.updateSidebarViews();
       
       const runEvents = this.currentSyncRunEvents || [];
 
@@ -2293,6 +2311,8 @@ class CoSyncPlugin extends Plugin {
             const newHash = getContentHash(initialText);
             await this.markDocumentSynced(docId, initialText, newHash);
             this.settings.fileMappings[normalizedPath] = docId;
+            this.verifyActiveFileMapping();
+            this.updateSidebarViews();
           } catch (err) {
             this.deleteProgrammedModification(normalizedPath);
             console.error(`Failed to create new downloaded note ${normalizedPath}`, err);

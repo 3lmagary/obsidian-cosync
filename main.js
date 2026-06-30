@@ -10398,6 +10398,23 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
   hasProgrammedModification(path) {
     return this.programmedModifications.has(path.normalize("NFC"));
   }
+  updateSidebarViews() {
+    const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
+    leaves.forEach((leaf) => {
+      if (leaf.view instanceof CoSyncView) {
+        leaf.view.render();
+      }
+    });
+  }
+  verifyActiveFileMapping() {
+    if (!this.activeFile) return;
+    const activePath = this.activeFile.path.normalize("NFC");
+    const mappedId = this.settings.fileMappings[activePath];
+    if (mappedId && mappedId !== this.activeDocumentId) {
+      console.log(`CoSync: Active file document ID changed to ${mappedId}. Reconnecting...`);
+      this.reconnect();
+    }
+  }
   logEvent(level, message) {
     const timestamp = (/* @__PURE__ */ new Date()).toLocaleTimeString();
     this.recentLogs.unshift({ timestamp, level, message });
@@ -10408,12 +10425,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     if (this.currentSyncRunEvents) {
       this.currentSyncRunEvents.push(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
     }
-    const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
-    leaves.forEach((leaf) => {
-      if (leaf.view instanceof CoSyncView) {
-        leaf.view.render();
-      }
-    });
+    this.updateSidebarViews();
   }
   updateStatusBar(status, customText) {
     this.currentStatus = status;
@@ -10878,7 +10890,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
   bindYjsToEditor() {
     if (!this.ydoc || !this.wsProvider || !this.activeFile) return;
     const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-    if (activeView && activeView.file?.path === this.activeFile.path) {
+    if (activeView && activeView.file?.path.normalize("NFC") === this.activeFile.path.normalize("NFC")) {
       const editor = activeView.editor;
       if (editor && editor.cm) {
         const cmView5 = editor.cm;
@@ -11168,11 +11180,13 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.updateStatusBar("connecting");
     this.wsProvider.on("status", ({ status }) => {
       this.updateStatusBar(status);
+      this.updateSidebarViews();
     });
     this.wsProvider.on("sync", (isSynced) => {
       if (isSynced) {
         console.log("CoSync: Collaborative room synced. Binding to editor.");
         this.bindYjsToEditor();
+        this.updateSidebarViews();
       }
     });
     this.wsProvider.maxBackoffTime = 3e4;
@@ -11183,12 +11197,13 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       userId: "obsidian-client"
     });
     this.wsProvider.awareness.on("change", () => {
+      this.updateSidebarViews();
     });
     ytext.observe((event, transaction) => {
       if (transaction && transaction.local) return;
       if (this.syncTimeout) clearTimeout(this.syncTimeout);
       const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-      const isFocused = activeView && activeView.file?.path === this.activeFile?.path && activeView.editor?.hasFocus();
+      const isFocused = activeView && activeView.file?.path.normalize("NFC") === this.activeFile?.path.normalize("NFC") && activeView.editor?.hasFocus();
       const debounceDelay = isFocused ? 1500 : 100;
       this.syncTimeout = setTimeout(async () => {
         this.syncTimeout = null;
@@ -11947,6 +11962,8 @@ ${localContent}
         }
       }
       await this.saveData(this.settings);
+      this.verifyActiveFileMapping();
+      this.updateSidebarViews();
       const runEvents = this.currentSyncRunEvents || [];
       const hasChanges = uploadedCount > 0 || downloadedCount > 0 || deletedCount > 0 || reconciledCount > 0 || errors.length > 0;
       if (hasChanges) {
@@ -12242,6 +12259,8 @@ ${localContent}
             const newHash = getContentHash(initialText);
             await this.markDocumentSynced(docId, initialText, newHash);
             this.settings.fileMappings[normalizedPath] = docId;
+            this.verifyActiveFileMapping();
+            this.updateSidebarViews();
           } catch (err) {
             this.deleteProgrammedModification(normalizedPath);
             console.error(`Failed to create new downloaded note ${normalizedPath}`, err);
