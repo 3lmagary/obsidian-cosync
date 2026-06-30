@@ -11587,7 +11587,7 @@ ${localContent}
         }
       }
       await this.saveData(this.settings);
-      for (const file of localSyncable) {
+      for (let file of localSyncable) {
         if (file.path === "cosync-sync-log.md") continue;
         const isMarkdown = file.extension.toLowerCase() === "md";
         const title = isMarkdown ? file.path.endsWith(".md") ? file.path.slice(0, -3) : file.path : file.path;
@@ -11600,6 +11600,41 @@ ${localContent}
         let matchedServerDoc = existsOnServer ? serverDocIdMap.get(docId) : serverDocTitleMap.get(title.trim().toLowerCase());
         if (matchedServerDoc) {
           docId = matchedServerDoc.id;
+          const expectedPath = isMarkdown ? matchedServerDoc.title.endsWith(".md") ? matchedServerDoc.title : `${matchedServerDoc.title}.md` : matchedServerDoc.title;
+          if (expectedPath.toLowerCase() !== file.path.toLowerCase()) {
+            console.log(`CoSync: Document path changed on server from "${file.path}" to "${expectedPath}". Renaming locally...`);
+            const parts = expectedPath.split("/");
+            if (parts.length > 1) {
+              let current = "";
+              for (let i = 0; i < parts.length - 1; i++) {
+                current = current ? `${current}/${parts[i]}` : parts[i];
+                if (!this.app.vault.getAbstractFileByPath(current)) {
+                  await this.app.vault.createFolder(current);
+                }
+              }
+            }
+            this.isApplyingRemoteUpdate = true;
+            this.programmedModifications.add(expectedPath);
+            this.programmedModifications.add(file.path);
+            try {
+              await this.app.vault.rename(file, expectedPath);
+              this.logEvent("info", `Renamed local note "${file.path}" to "${expectedPath}" (synced server rename)`);
+              delete this.settings.fileMappings[file.path];
+              this.settings.fileMappings[expectedPath] = docId;
+              await this.saveData(this.settings);
+              const updatedFile = this.app.vault.getAbstractFileByPath(expectedPath);
+              if (updatedFile instanceof import_obsidian.TFile) {
+                file = updatedFile;
+              }
+            } catch (err) {
+              this.programmedModifications.delete(expectedPath);
+              this.programmedModifications.delete(file.path);
+              console.error("CoSync: Error renaming local document to match server title:", err);
+              errors.push(`Error renaming local document "${file.path}": ${err.message || err}`);
+            } finally {
+              this.isApplyingRemoteUpdate = false;
+            }
+          }
           this.settings.fileMappings[file.path] = docId;
           const localContent = await this.app.vault.read(file);
           const localHash = getContentHash(localContent);
