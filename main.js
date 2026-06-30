@@ -10841,11 +10841,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         const yContentWithId = isMarkdown ? stripCosyncId(yContent) : yContent;
         if (normalizeText(yContentWithId) !== normalizeText(currentContent)) {
           this.isApplyingRemoteUpdate = true;
-          this.programmedModifications.add(this.activeFile.path);
+          this.addProgrammedModification(this.activeFile.path);
           try {
             await this.app.vault.modify(this.activeFile, yContentWithId);
           } catch (err) {
-            this.programmedModifications.delete(this.activeFile.path);
+            this.deleteProgrammedModification(this.activeFile.path);
             throw err;
           } finally {
             this.isApplyingRemoteUpdate = false;
@@ -11218,11 +11218,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
           } else {
             if (localContent !== serverContentWithId) {
               this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
+              this.addProgrammedModification(file.path);
               try {
                 await this.app.vault.modify(file, serverContentWithId);
               } catch (err) {
-                this.programmedModifications.delete(file.path);
+                this.deleteProgrammedModification(file.path);
                 throw err;
               } finally {
                 this.isApplyingRemoteUpdate = false;
@@ -11242,11 +11242,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             console.log(`CoSync: Pushed offline local changes to server.`);
           } else if (!localChanged && serverChanged) {
             this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(file.path);
+            this.addProgrammedModification(file.path);
             try {
               await this.app.vault.modify(file, serverContentWithId);
             } catch (err) {
-              this.programmedModifications.delete(file.path);
+              this.deleteProgrammedModification(file.path);
               throw err;
             } finally {
               this.isApplyingRemoteUpdate = false;
@@ -11264,11 +11264,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
               const mergedContentWithId = isMarkdown ? stripCosyncId(mergedContent) : mergedContent;
               const mergedHash = getContentHash(mergedContentWithId);
               this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
+              this.addProgrammedModification(file.path);
               try {
                 await this.app.vault.modify(file, mergedContentWithId);
               } catch (err) {
-                this.programmedModifications.delete(file.path);
+                this.deleteProgrammedModification(file.path);
                 throw err;
               } finally {
                 this.isApplyingRemoteUpdate = false;
@@ -11288,11 +11288,11 @@ ${localContent}
                 updateYTextCleanly(ytext, mergedContentWithId);
               }, "local-reconciliation-merge-fallback");
               this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
+              this.addProgrammedModification(file.path);
               try {
                 await this.app.vault.modify(file, mergedContentWithId);
               } catch (err) {
-                this.programmedModifications.delete(file.path);
+                this.deleteProgrammedModification(file.path);
                 throw err;
               } finally {
                 this.isApplyingRemoteUpdate = false;
@@ -11330,11 +11330,11 @@ ${localContent}
       const normalizeText = (str) => str.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
       if (normalizeText(yContentWithId) !== normalizeText(currentContent)) {
         this.isApplyingRemoteUpdate = true;
-        this.programmedModifications.add(this.activeFile.path);
+        this.addProgrammedModification(this.activeFile.path);
         try {
           await this.app.vault.modify(this.activeFile, yContentWithId);
         } catch (err) {
-          this.programmedModifications.delete(this.activeFile.path);
+          this.deleteProgrammedModification(this.activeFile.path);
           throw err;
         } finally {
           this.isApplyingRemoteUpdate = false;
@@ -11354,8 +11354,8 @@ ${localContent}
    * transaction to Y.Doc, which handles CRDT reconciliation automatically.
    */
   async handleExternalModification(file) {
-    if (this.programmedModifications.has(file.path)) {
-      this.programmedModifications.delete(file.path);
+    if (this.hasProgrammedModification(file.path)) {
+      this.deleteProgrammedModification(file.path);
       return;
     }
     const isMarkdown = file.extension.toLowerCase() === "md";
@@ -12095,12 +12095,12 @@ ${localContent}
               } else {
                 if (localContent !== serverContentWithId) {
                   this.isApplyingRemoteUpdate = true;
-                  this.programmedModifications.add(file.path);
+                  this.addProgrammedModification(file.path);
                   try {
                     await this.app.vault.modify(file, serverContentWithId);
                     outcome = "downloaded";
                   } catch (e) {
-                    this.programmedModifications.delete(file.path);
+                    this.deleteProgrammedModification(file.path);
                     throw e;
                   } finally {
                     this.isApplyingRemoteUpdate = false;
@@ -12121,12 +12121,12 @@ ${localContent}
                 outcome = "uploaded";
               } else if (!localChanged && serverChanged) {
                 this.isApplyingRemoteUpdate = true;
-                this.programmedModifications.add(file.path);
+                this.addProgrammedModification(file.path);
                 try {
                   await this.app.vault.modify(file, serverContentWithId);
                   outcome = "downloaded";
                 } catch (e) {
-                  this.programmedModifications.delete(file.path);
+                  this.deleteProgrammedModification(file.path);
                   throw e;
                 } finally {
                   this.isApplyingRemoteUpdate = false;
@@ -12144,12 +12144,12 @@ ${localContent}
                   const mergedContentWithId = isMarkdown ? stripCosyncId(mergedContent) : mergedContent;
                   const mergedHash = getContentHash(mergedContentWithId);
                   this.isApplyingRemoteUpdate = true;
-                  this.programmedModifications.add(file.path);
+                  this.addProgrammedModification(file.path);
                   try {
                     await this.app.vault.modify(file, mergedContentWithId);
                     outcome = "merged";
                   } catch (e) {
-                    this.programmedModifications.delete(file.path);
+                    this.deleteProgrammedModification(file.path);
                     throw e;
                   } finally {
                     this.isApplyingRemoteUpdate = false;
@@ -12170,12 +12170,12 @@ ${localContent}
                     updateYTextCleanly(ytext, mergedContentWithId);
                   }, "local-reconciliation-merge-fallback");
                   this.isApplyingRemoteUpdate = true;
-                  this.programmedModifications.add(file.path);
+                  this.addProgrammedModification(file.path);
                   try {
                     await this.app.vault.modify(file, mergedContentWithId);
                     outcome = "merged";
                   } catch (e) {
-                    this.programmedModifications.delete(file.path);
+                    this.deleteProgrammedModification(file.path);
                     throw e;
                   } finally {
                     this.isApplyingRemoteUpdate = false;

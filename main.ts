@@ -631,11 +631,11 @@ class CoSyncPlugin extends Plugin {
         const yContentWithId = isMarkdown ? stripCosyncId(yContent) : yContent;
         if (normalizeText(yContentWithId) !== normalizeText(currentContent)) {
           this.isApplyingRemoteUpdate = true;
-          this.programmedModifications.add(this.activeFile.path);
+          this.addProgrammedModification(this.activeFile.path);
           try {
             await this.app.vault.modify(this.activeFile, yContentWithId);
           } catch (err) {
-            this.programmedModifications.delete(this.activeFile.path);
+            this.deleteProgrammedModification(this.activeFile.path);
             throw err;
           } finally {
             this.isApplyingRemoteUpdate = false;
@@ -1109,11 +1109,11 @@ class CoSyncPlugin extends Plugin {
             // Server has content. Overwrite local with server.
             if (localContent !== serverContentWithId) {
               this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
+              this.addProgrammedModification(file.path);
               try {
                 await this.app.vault.modify(file, serverContentWithId);
               } catch (err) {
-                this.programmedModifications.delete(file.path);
+                this.deleteProgrammedModification(file.path);
                 throw err;
               } finally {
                 this.isApplyingRemoteUpdate = false;
@@ -1137,11 +1137,11 @@ class CoSyncPlugin extends Plugin {
           } else if (!localChanged && serverChanged) {
             // Pull server changes to local note
             this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(file.path);
+            this.addProgrammedModification(file.path);
             try {
               await this.app.vault.modify(file, serverContentWithId);
             } catch (err) {
-              this.programmedModifications.delete(file.path);
+              this.deleteProgrammedModification(file.path);
               throw err;
             } finally {
               this.isApplyingRemoteUpdate = false;
@@ -1164,11 +1164,11 @@ class CoSyncPlugin extends Plugin {
               const mergedHash = getContentHash(mergedContentWithId);
 
               this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
+              this.addProgrammedModification(file.path);
               try {
                 await this.app.vault.modify(file, mergedContentWithId);
               } catch (err) {
-                this.programmedModifications.delete(file.path);
+                this.deleteProgrammedModification(file.path);
                 throw err;
               } finally {
                 this.isApplyingRemoteUpdate = false;
@@ -1188,11 +1188,11 @@ class CoSyncPlugin extends Plugin {
               }, 'local-reconciliation-merge-fallback');
 
               this.isApplyingRemoteUpdate = true;
-              this.programmedModifications.add(file.path);
+              this.addProgrammedModification(file.path);
               try {
                 await this.app.vault.modify(file, mergedContentWithId);
               } catch (err) {
-                this.programmedModifications.delete(file.path);
+                this.deleteProgrammedModification(file.path);
                 throw err;
               } finally {
                 this.isApplyingRemoteUpdate = false;
@@ -1246,11 +1246,11 @@ class CoSyncPlugin extends Plugin {
         // SAFEGUARD: Set flag so that vault.on('modify') does not treat this write
         // as a local edit transaction and recursively push it back to the server.
         this.isApplyingRemoteUpdate = true;
-        this.programmedModifications.add(this.activeFile.path);
+        this.addProgrammedModification(this.activeFile.path);
         try {
           await this.app.vault.modify(this.activeFile, yContentWithId);
         } catch (err) {
-          this.programmedModifications.delete(this.activeFile.path);
+          this.deleteProgrammedModification(this.activeFile.path);
           throw err;
         } finally {
           this.isApplyingRemoteUpdate = false;
@@ -1272,8 +1272,8 @@ class CoSyncPlugin extends Plugin {
    * transaction to Y.Doc, which handles CRDT reconciliation automatically.
    */
   private async handleExternalModification(file: TFile) {
-    if (this.programmedModifications.has(file.path)) {
-      this.programmedModifications.delete(file.path);
+    if (this.hasProgrammedModification(file.path)) {
+      this.deleteProgrammedModification(file.path);
       return;
     }
 
@@ -2136,12 +2136,12 @@ class CoSyncPlugin extends Plugin {
               } else {
                 if (localContent !== serverContentWithId) {
                   this.isApplyingRemoteUpdate = true;
-                  this.programmedModifications.add(file.path);
+                  this.addProgrammedModification(file.path);
                   try {
                     await this.app.vault.modify(file, serverContentWithId);
                     outcome = 'downloaded';
                   } catch (e) {
-                    this.programmedModifications.delete(file.path);
+                    this.deleteProgrammedModification(file.path);
                     throw e;
                   } finally {
                     this.isApplyingRemoteUpdate = false;
@@ -2163,12 +2163,12 @@ class CoSyncPlugin extends Plugin {
                 outcome = 'uploaded';
               } else if (!localChanged && serverChanged) {
                 this.isApplyingRemoteUpdate = true;
-                this.programmedModifications.add(file.path);
+                this.addProgrammedModification(file.path);
                 try {
                   await this.app.vault.modify(file, serverContentWithId);
                   outcome = 'downloaded';
                 } catch (e) {
-                  this.programmedModifications.delete(file.path);
+                  this.deleteProgrammedModification(file.path);
                   throw e;
                 } finally {
                   this.isApplyingRemoteUpdate = false;
@@ -2189,12 +2189,12 @@ class CoSyncPlugin extends Plugin {
                   const mergedHash = getContentHash(mergedContentWithId);
 
                   this.isApplyingRemoteUpdate = true;
-                  this.programmedModifications.add(file.path);
+                  this.addProgrammedModification(file.path);
                   try {
                     await this.app.vault.modify(file, mergedContentWithId);
                     outcome = 'merged';
                   } catch (e) {
-                    this.programmedModifications.delete(file.path);
+                    this.deleteProgrammedModification(file.path);
                     throw e;
                   } finally {
                     this.isApplyingRemoteUpdate = false;
@@ -2215,12 +2215,12 @@ class CoSyncPlugin extends Plugin {
                   }, 'local-reconciliation-merge-fallback');
 
                   this.isApplyingRemoteUpdate = true;
-                  this.programmedModifications.add(file.path);
+                  this.addProgrammedModification(file.path);
                   try {
                     await this.app.vault.modify(file, mergedContentWithId);
                     outcome = 'merged';
                   } catch (e) {
-                    this.programmedModifications.delete(file.path);
+                    this.deleteProgrammedModification(file.path);
                     throw e;
                   } finally {
                     this.isApplyingRemoteUpdate = false;
