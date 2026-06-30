@@ -11429,7 +11429,11 @@ ${localContent}
     } else {
       const normalizedFileMappings = {};
       for (const [key, val] of Object.entries(this.settings.fileMappings)) {
-        normalizedFileMappings[key.normalize("NFC")] = val;
+        const normKey = key.normalize("NFC");
+        if (normKey.toLowerCase().endsWith(".excalidraw.md") || normKey.toLowerCase().endsWith(".excalidraw")) {
+          continue;
+        }
+        normalizedFileMappings[normKey] = val;
       }
       this.settings.fileMappings = normalizedFileMappings;
     }
@@ -11831,6 +11835,9 @@ ${localContent}
         }
       }
       for (const doc2 of serverDocs) {
+        if (doc2.title.toLowerCase().endsWith(".excalidraw.md") || doc2.title.toLowerCase().endsWith(".excalidraw")) {
+          continue;
+        }
         const isMapped = Object.values(this.settings.fileMappings).includes(doc2.id);
         if (!isMapped) {
           const docTitleNormalized = doc2.title.normalize("NFC");

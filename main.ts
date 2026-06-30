@@ -1371,7 +1371,11 @@ class CoSyncPlugin extends Plugin {
     } else {
       const normalizedFileMappings: Record<string, string> = {};
       for (const [key, val] of Object.entries(this.settings.fileMappings)) {
-        normalizedFileMappings[key.normalize('NFC')] = val;
+        const normKey = key.normalize('NFC');
+        if (normKey.toLowerCase().endsWith('.excalidraw.md') || normKey.toLowerCase().endsWith('.excalidraw')) {
+          continue; // Clean up old document mapping for Excalidraw files
+        }
+        normalizedFileMappings[normKey] = val;
       }
       this.settings.fileMappings = normalizedFileMappings;
     }
@@ -1845,6 +1849,9 @@ class CoSyncPlugin extends Plugin {
 
       // Identify missing local files that exist on server
       for (const doc of serverDocs) {
+        if (doc.title.toLowerCase().endsWith('.excalidraw.md') || doc.title.toLowerCase().endsWith('.excalidraw')) {
+          continue;
+        }
         // If we don't have this doc mapped to any local file path
         const isMapped = Object.values(this.settings.fileMappings).includes(doc.id);
         if (!isMapped) {
