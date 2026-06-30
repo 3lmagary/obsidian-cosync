@@ -10712,7 +10712,21 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.lastWsUrl = "";
     this.lastWsToken = "";
   }
+  /** Returns true for .excalidraw and .excalidraw.md files. These are text-based
+   * (UTF-8 JSON) and must be treated as text by Obsidian APIs to avoid corruption. */
+  isExcalidrawFile(filePath) {
+    const lp = filePath.toLowerCase();
+    return lp.endsWith(".excalidraw.md") || lp.endsWith(".excalidraw");
+  }
   async readLocalBinary(filePath) {
+    if (!filePath.startsWith(".") && this.isExcalidrawFile(filePath)) {
+      const file = this.app.vault.getAbstractFileByPath(filePath);
+      if (file instanceof import_obsidian.TFile) {
+        const text2 = await this.app.vault.read(file);
+        return new TextEncoder().encode(text2).buffer;
+      }
+      throw new Error(`File not found: ${filePath}`);
+    }
     if (filePath.startsWith(".")) {
       return await this.app.vault.adapter.readBinary(filePath);
     } else {
@@ -10724,6 +10738,26 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     }
   }
   async writeLocalBinary(filePath, data) {
+    if (!filePath.startsWith(".") && this.isExcalidrawFile(filePath)) {
+      const text2 = new TextDecoder().decode(data);
+      const file = this.app.vault.getAbstractFileByPath(filePath);
+      if (file instanceof import_obsidian.TFile) {
+        await this.app.vault.modify(file, text2);
+      } else {
+        const parts = filePath.split("/");
+        if (parts.length > 1) {
+          let current = "";
+          for (let i = 0; i < parts.length - 1; i++) {
+            current = current ? `${current}/${parts[i]}` : parts[i];
+            if (!this.app.vault.getAbstractFileByPath(current)) {
+              await this.app.vault.createFolder(current);
+            }
+          }
+        }
+        await this.app.vault.create(filePath, text2);
+      }
+      return;
+    }
     if (filePath.startsWith(".")) {
       const parts = filePath.split("/");
       if (parts.length > 1) {
@@ -11377,7 +11411,7 @@ ${localContent}
       this.deleteProgrammedModification(file.path);
       return;
     }
-    const isMarkdown = file.extension.toLowerCase() === "md";
+    const isMarkdown = file.extension.toLowerCase() === "md" && !this.isExcalidrawFile(file.path);
     if (isMarkdown && this.wsProvider && this.wsProvider.wsconnected) {
       return;
     }
@@ -11891,7 +11925,11 @@ ${localContent}
           const localHash = getBinaryHash(localBuffer);
           const lastSyncedHash = this.settings.syncHashes[normalizedFilePath];
           const serverAttach = serverAttachMap.get(normalizedFilePath.toLowerCase());
-          if (!serverAttach || serverAttach.hash !== localHash || localHash !== lastSyncedHash) {
+          if (serverAttach && serverAttach.hash === localHash) {
+            if (lastSyncedHash !== localHash) {
+              this.settings.syncHashes[normalizedFilePath] = localHash;
+            }
+          } else if (!serverAttach || serverAttach.hash !== localHash) {
             console.log(`CoSync: Uploading background attachment "${normalizedFilePath}" (size=${localBuffer.byteLength} bytes)...`);
             const uploadRes = await fetch(
               `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(normalizedFilePath)}&hash=${localHash}`,
@@ -11924,7 +11962,17 @@ ${localContent}
           const normalizedAttachPath = attach.filepath.normalize("NFC");
           const localFile = localBinaryMap.get(normalizedAttachPath.toLowerCase());
           const lastSyncedHash = this.settings.syncHashes[normalizedAttachPath];
-          if (!localFile || attach.hash !== lastSyncedHash) {
+          let needsDownload = !localFile;
+          if (!needsDownload && attach.hash !== lastSyncedHash) {
+            try {
+              const localBuffer = await this.readLocalBinary(normalizedAttachPath);
+              const localHash = getBinaryHash(localBuffer);
+              needsDownload = localHash !== attach.hash;
+            } catch {
+              needsDownload = true;
+            }
+          }
+          if (needsDownload) {
             console.log(`CoSync: Downloading background attachment "${normalizedAttachPath}" (size=${attach.size} bytes)...`);
             const pathParts = normalizedAttachPath.split("/");
             if (pathParts.length > 1) {

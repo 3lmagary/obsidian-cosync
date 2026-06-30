@@ -490,7 +490,24 @@ class CoSyncPlugin extends Plugin {
     this.lastWsToken = '';
   }
 
+  /** Returns true for .excalidraw and .excalidraw.md files. These are text-based
+   * (UTF-8 JSON) and must be treated as text by Obsidian APIs to avoid corruption. */
+  private isExcalidrawFile(filePath: string): boolean {
+    const lp = filePath.toLowerCase();
+    return lp.endsWith('.excalidraw.md') || lp.endsWith('.excalidraw');
+  }
+
   private async readLocalBinary(filePath: string): Promise<ArrayBuffer> {
+    // .excalidraw.md files are plain text (UTF-8 JSON). Read as text and encode
+    // to a stable UTF-8 buffer so the hash is consistent across platforms.
+    if (!filePath.startsWith('.') && this.isExcalidrawFile(filePath)) {
+      const file = this.app.vault.getAbstractFileByPath(filePath);
+      if (file instanceof TFile) {
+        const text = await this.app.vault.read(file);
+        return new TextEncoder().encode(text).buffer;
+      }
+      throw new Error(`File not found: ${filePath}`);
+    }
     if (filePath.startsWith('.')) {
       return await this.app.vault.adapter.readBinary(filePath);
     } else {
@@ -503,6 +520,29 @@ class CoSyncPlugin extends Plugin {
   }
 
   private async writeLocalBinary(filePath: string, data: ArrayBuffer): Promise<void> {
+    // .excalidraw.md files must be written as text to avoid binary corruption in Obsidian.
+    // This matches the LiveSync approach: isPlainText('.excalidraw.md') → true.
+    if (!filePath.startsWith('.') && this.isExcalidrawFile(filePath)) {
+      const text = new TextDecoder().decode(data);
+      const file = this.app.vault.getAbstractFileByPath(filePath);
+      if (file instanceof TFile) {
+        await this.app.vault.modify(file, text);
+      } else {
+        // Ensure parent folders exist
+        const parts = filePath.split('/');
+        if (parts.length > 1) {
+          let current = '';
+          for (let i = 0; i < parts.length - 1; i++) {
+            current = current ? `${current}/${parts[i]}` : parts[i];
+            if (!this.app.vault.getAbstractFileByPath(current)) {
+              await this.app.vault.createFolder(current);
+            }
+          }
+        }
+        await this.app.vault.create(filePath, text);
+      }
+      return;
+    }
     if (filePath.startsWith('.')) {
       // Ensure parent folders exist
       const parts = filePath.split('/');
@@ -1298,7 +1338,9 @@ class CoSyncPlugin extends Plugin {
       return;
     }
 
-    const isMarkdown = file.extension.toLowerCase() === 'md';
+    // Excalidraw files (.excalidraw.md) end in .md but are NOT regular markdown:
+    // they must never be processed by the Yjs text-diff engine.
+    const isMarkdown = file.extension.toLowerCase() === 'md' && !this.isExcalidrawFile(file.path);
 
     // If WebSocket is connected, yCollab handles all sync (only for Markdown).
     // External modification check is only needed for offline reconciliation or when disconnected,
@@ -1920,7 +1962,14 @@ class CoSyncPlugin extends Plugin {
 
           const serverAttach = serverAttachMap.get(normalizedFilePath.toLowerCase());
 
-          if (!serverAttach || serverAttach.hash !== localHash || localHash !== lastSyncedHash) {
+          // Upload only when the server doesn't already have the current local content.
+          // If serverAttach.hash === localHash the server is up-to-date; also update
+          // lastSyncedHash so future runs don't redundantly re-check.
+          if (serverAttach && serverAttach.hash === localHash) {
+            if (lastSyncedHash !== localHash) {
+              this.settings.syncHashes[normalizedFilePath] = localHash; // heal stale cache
+            }
+          } else if (!serverAttach || serverAttach.hash !== localHash) {
             console.log(`CoSync: Uploading background attachment "${normalizedFilePath}" (size=${localBuffer.byteLength} bytes)...`);
             const uploadRes = await fetch(
               `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(normalizedFilePath)}&hash=${localHash}`,
@@ -1956,7 +2005,24 @@ class CoSyncPlugin extends Plugin {
           const localFile = localBinaryMap.get(normalizedAttachPath.toLowerCase());
           const lastSyncedHash = this.settings.syncHashes[normalizedAttachPath];
 
-          if (!localFile || attach.hash !== lastSyncedHash) {
+          // Determine if we need to download:
+          // - File is missing locally, OR
+          // - Server hash differs from what we last synced AND differs from current local content
+          //   (prevents a Device B from skipping a download when its lastSyncedHash is stale)
+          let needsDownload = !localFile;
+          if (!needsDownload && attach.hash !== lastSyncedHash) {
+            // Server has something different from what we last synced.
+            // Check actual local file content to confirm we don't already have the server version.
+            try {
+              const localBuffer = await this.readLocalBinary(normalizedAttachPath);
+              const localHash = getBinaryHash(localBuffer);
+              needsDownload = localHash !== attach.hash;
+            } catch {
+              needsDownload = true; // Can't read local file, re-download
+            }
+          }
+
+          if (needsDownload) {
             console.log(`CoSync: Downloading background attachment "${normalizedAttachPath}" (size=${attach.size} bytes)...`);
             
             // Create parent folders if needed
