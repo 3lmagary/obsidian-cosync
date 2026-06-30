@@ -10526,11 +10526,14 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         }
         if (isProgrammed) return;
         let changed = false;
+        const renamesToSync = [];
         if (file instanceof import_obsidian.TFile) {
           if (this.settings.fileMappings?.[oldPath]) {
-            this.settings.fileMappings[file.path] = this.settings.fileMappings[oldPath];
+            const docId = this.settings.fileMappings[oldPath];
+            this.settings.fileMappings[file.path] = docId;
             delete this.settings.fileMappings[oldPath];
             changed = true;
+            renamesToSync.push({ docId, newPath: file.path });
           }
         } else if (file instanceof import_obsidian.TFolder) {
           const oldPrefix = oldPath + "/";
@@ -10542,16 +10545,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
                 this.settings.fileMappings[newPath] = docId;
                 delete this.settings.fileMappings[path];
                 changed = true;
-              }
-            }
-          }
-          if (this.settings.syncHashes) {
-            for (const [path, hash] of Object.entries(this.settings.syncHashes)) {
-              if (path.startsWith(oldPrefix)) {
-                const newPath = newPrefix + path.substring(oldPrefix.length);
-                this.settings.syncHashes[newPath] = hash;
-                delete this.settings.syncHashes[path];
-                changed = true;
+                renamesToSync.push({ docId, newPath });
               }
             }
           }
@@ -10559,10 +10553,24 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         if (changed) {
           this.saveSettings();
         }
-        if (this.isApplyingRemoteUpdate) return;
-        if (this.isSyncing) return;
-        if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
-        this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
+        const triggerSync = () => {
+          if (this.isApplyingRemoteUpdate) return;
+          if (this.isSyncing) return;
+          if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
+          this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
+        };
+        if (renamesToSync.length > 0) {
+          Promise.all(
+            renamesToSync.map((r) => this.updateServerDocumentTitle(r.docId, r.newPath))
+          ).then(() => {
+            triggerSync();
+          }).catch((err) => {
+            console.error("CoSync: Error updating server titles for renamed items:", err);
+            triggerSync();
+          });
+        } else {
+          triggerSync();
+        }
       })
     );
     this.app.workspace.onLayoutReady(() => {
@@ -10724,6 +10732,30 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       if (fileToDel instanceof import_obsidian.TFile) {
         await this.app.vault.delete(fileToDel);
       }
+    }
+  }
+  async updateServerDocumentTitle(docId, newPath) {
+    if (!this.settings.serverUrl || !this.settings.token || !this.settings.workspaceId) {
+      return;
+    }
+    const isMarkdown = newPath.endsWith(".md") && !newPath.toLowerCase().endsWith(".excalidraw.md");
+    const title = isMarkdown ? newPath.slice(0, -3) : newPath;
+    try {
+      const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.settings.token}`
+        },
+        body: JSON.stringify({ title })
+      });
+      if (res.ok) {
+        this.logEvent("success", `Updated server document title for docId "${docId}" to "${title}"`);
+      } else {
+        this.logEvent("error", `Failed to update server title for docId "${docId}": HTTP ${res.status}`);
+      }
+    } catch (err) {
+      this.logEvent("error", `Failed to update server title for docId "${docId}": ${err.message || err}`);
     }
   }
   async cleanEmptyFolders(deletedFiles) {
@@ -11531,32 +11563,37 @@ ${localContent}
       for (const [filePath, docId] of Object.entries(this.settings.fileMappings)) {
         if (!serverDocIds.has(docId)) {
           const localFile = localSyncableMap.get(filePath.toLowerCase());
-          if (localFile) {
-            const localContent = await this.app.vault.read(localFile);
-            const localHash = getContentHash(localContent);
-            const lastSyncedHash = this.settings.syncHashes[docId];
-            const localChanged = localHash !== lastSyncedHash;
-            if (localChanged) {
-              this.logEvent("warn", `Document "${filePath}" was deleted on server but has local changes. Re-uploading...`);
-              delete this.settings.fileMappings[filePath];
-              delete this.settings.syncHashes[docId];
-              delete this.settings.syncVersions[docId];
-              continue;
-            }
-            console.log(`CoSync: Document "${filePath}" was deleted on server. Deleting locally...`);
-            this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(filePath);
+          if (localFile && this.app.vault.getAbstractFileByPath(localFile.path)) {
             try {
-              await this.app.vault.delete(localFile);
-              deletedCount++;
-              filesDeletedDuringSync.add(filePath);
-              this.logEvent("info", `Deleted local note "${filePath}" (synced server deletion)`);
+              const localContent = await this.app.vault.read(localFile);
+              const localHash = getContentHash(localContent);
+              const lastSyncedHash = this.settings.syncHashes[docId];
+              const localChanged = localHash !== lastSyncedHash;
+              if (localChanged) {
+                this.logEvent("warn", `Document "${filePath}" was deleted on server but has local changes. Re-uploading...`);
+                delete this.settings.fileMappings[filePath];
+                delete this.settings.syncHashes[docId];
+                delete this.settings.syncVersions[docId];
+                continue;
+              }
+              console.log(`CoSync: Document "${filePath}" was deleted on server. Deleting locally...`);
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(filePath);
+              try {
+                await this.app.vault.delete(localFile);
+                deletedCount++;
+                filesDeletedDuringSync.add(filePath);
+                this.logEvent("info", `Deleted local note "${filePath}" (synced server deletion)`);
+              } catch (err) {
+                this.programmedModifications.delete(filePath);
+                this.logEvent("error", `Failed to delete local document "${filePath}": ${err.message || err}`);
+                errors.push(`Failed to delete local document "${filePath}": ${err.message || err}`);
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
             } catch (err) {
-              this.programmedModifications.delete(filePath);
-              this.logEvent("error", `Failed to delete local document "${filePath}": ${err.message || err}`);
-              errors.push(`Failed to delete local document "${filePath}": ${err.message || err}`);
-            } finally {
-              this.isApplyingRemoteUpdate = false;
+              this.logEvent("error", `Error reading local document "${filePath}" during deletion sync: ${err.message || err}`);
+              errors.push(`Error reading local document "${filePath}": ${err.message || err}`);
             }
           }
           delete this.settings.fileMappings[filePath];
@@ -11568,29 +11605,34 @@ ${localContent}
         const isMarkdown = filePath.endsWith(".md") && !filePath.toLowerCase().endsWith(".excalidraw.md") || filePath.endsWith(".txt") || filePath.startsWith("doc_") || filePath.startsWith("obs-");
         if (!isMarkdown && !serverAttachPaths.has(filePath.toLowerCase())) {
           const localFile = localBinaryMap.get(filePath.toLowerCase());
-          if (localFile) {
-            const localBuffer = await this.readLocalBinary(filePath);
-            const localHash = getBinaryHash(localBuffer);
-            const localChanged = localHash !== lastHash;
-            if (localChanged) {
-              this.logEvent("warn", `Attachment "${filePath}" was deleted on server but has local changes. Re-uploading...`);
-              delete this.settings.syncHashes[filePath];
-              continue;
-            }
-            console.log(`CoSync: Attachment "${filePath}" was deleted on server. Deleting locally...`);
-            this.isApplyingRemoteUpdate = true;
-            this.programmedModifications.add(filePath);
+          if (localFile && this.app.vault.getAbstractFileByPath(localFile.path)) {
             try {
-              await this.deleteLocalFile(filePath, localFile);
-              deletedCount++;
-              filesDeletedDuringSync.add(filePath);
-              this.logEvent("info", `Deleted local attachment "${filePath}" (synced server deletion)`);
+              const localBuffer = await this.readLocalBinary(filePath);
+              const localHash = getBinaryHash(localBuffer);
+              const localChanged = localHash !== lastHash;
+              if (localChanged) {
+                this.logEvent("warn", `Attachment "${filePath}" was deleted on server but has local changes. Re-uploading...`);
+                delete this.settings.syncHashes[filePath];
+                continue;
+              }
+              console.log(`CoSync: Attachment "${filePath}" was deleted on server. Deleting locally...`);
+              this.isApplyingRemoteUpdate = true;
+              this.programmedModifications.add(filePath);
+              try {
+                await this.deleteLocalFile(filePath, localFile);
+                deletedCount++;
+                filesDeletedDuringSync.add(filePath);
+                this.logEvent("info", `Deleted local attachment "${filePath}" (synced server deletion)`);
+              } catch (err) {
+                this.programmedModifications.delete(filePath);
+                this.logEvent("error", `Failed to delete local attachment "${filePath}": ${err.message || err}`);
+                errors.push(`Failed to delete local attachment "${filePath}": ${err.message || err}`);
+              } finally {
+                this.isApplyingRemoteUpdate = false;
+              }
             } catch (err) {
-              this.programmedModifications.delete(filePath);
-              this.logEvent("error", `Failed to delete local attachment "${filePath}": ${err.message || err}`);
-              errors.push(`Failed to delete local attachment "${filePath}": ${err.message || err}`);
-            } finally {
-              this.isApplyingRemoteUpdate = false;
+              this.logEvent("error", `Error reading local attachment "${filePath}" during deletion sync: ${err.message || err}`);
+              errors.push(`Error reading local attachment "${filePath}": ${err.message || err}`);
             }
           }
           delete this.settings.syncHashes[filePath];
@@ -11599,6 +11641,9 @@ ${localContent}
       await this.saveData(this.settings);
       for (let file of localSyncable) {
         if (file.path === "cosync-sync-log.md") continue;
+        if (!this.app.vault.getAbstractFileByPath(file.path)) {
+          continue;
+        }
         const isMarkdown = file.extension.toLowerCase() === "md";
         const title = isMarkdown ? file.path.endsWith(".md") ? file.path.slice(0, -3) : file.path : file.path;
         let docId = this.settings.fileMappings[file.path];
@@ -11763,6 +11808,9 @@ ${localContent}
         }
       }
       for (const file of localBinary) {
+        if (!this.app.vault.getAbstractFileByPath(file.path)) {
+          continue;
+        }
         try {
           const cooldownTime = this.downloadedFilesCooldown.get(file.path.toLowerCase());
           if (cooldownTime && Date.now() - cooldownTime < 4e3) {
