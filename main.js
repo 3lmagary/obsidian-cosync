@@ -12052,6 +12052,9 @@ ${localContent}
               const localChanged = localHash !== lastSyncedHash;
               const serverChanged = serverHash !== lastSyncedHash;
               if (localChanged && !serverChanged) {
+                tempYDoc.transact(() => {
+                  updateYTextCleanly(ytext, localContent);
+                }, "local-reconciliation-upload");
                 await this.markDocumentSynced(docId, localContent, localHash);
                 this.settings.syncVersions[docId] = serverVersion;
                 outcome = "uploaded";
