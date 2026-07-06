@@ -11057,7 +11057,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       }
     });
     if (!response.ok) {
-      throw new Error(`Failed to fetch documents: ${response.statusText}`);
+      throw new Error(`HTTP Error ${response.status}: Failed to fetch documents`);
     }
     this.serverDocsCache = await response.json();
     this.serverDocsCacheTime = now;
@@ -11133,7 +11133,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         body: JSON.stringify({ title })
       });
       if (!createResponse.ok) {
-        throw new Error(`Failed to create document: ${createResponse.statusText}`);
+        throw new Error(`HTTP Error ${createResponse.status}: Failed to create document`);
       }
       const newDoc = await createResponse.json();
       docId = newDoc.id;
@@ -11157,6 +11157,10 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       await this.saveSettings();
       return docId;
     } catch (err) {
+      if (err.message && (err.message.includes("HTTP Error 401") || err.message.includes("HTTP Error 403") || err.message.includes("HTTP Error 404"))) {
+        console.error("CoSync: Permanent error resolving document ID from server:", err);
+        throw err;
+      }
       console.warn("CoSync: Error resolving document ID from server. Falling back to local ID:", err);
       return this.getDocumentIdForFile(file);
     }
@@ -11197,7 +11201,15 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
       return;
     }
     const initialFileContent = await this.app.vault.read(file);
-    const documentId = await this.resolveDocumentId(file);
+    let documentId;
+    try {
+      documentId = await this.resolveDocumentId(file);
+    } catch (err) {
+      console.error("CoSync: Failed to resolve document ID:", err);
+      this.updateStatusBar("disconnected", "CoSync: Connection Error");
+      this.logEvent("error", `Connection failed: ${err.message || err}`);
+      return;
+    }
     if (this.activeFile !== file) {
       return;
     }

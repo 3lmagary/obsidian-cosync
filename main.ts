@@ -883,7 +883,7 @@ class CoSyncPlugin extends Plugin {
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch documents: ${response.statusText}`);
+      throw new Error(`HTTP Error ${response.status}: Failed to fetch documents`);
     }
 
     this.serverDocsCache = await response.json();
@@ -979,7 +979,7 @@ class CoSyncPlugin extends Plugin {
       });
 
       if (!createResponse.ok) {
-        throw new Error(`Failed to create document: ${createResponse.statusText}`);
+        throw new Error(`HTTP Error ${createResponse.status}: Failed to create document`);
       }
 
       const newDoc = await createResponse.json();
@@ -1006,7 +1006,11 @@ class CoSyncPlugin extends Plugin {
       this.settings.fileMappings[normalizedPath] = docId;
       await this.saveSettings();
       return docId;
-    } catch (err) {
+    } catch (err: any) {
+      if (err.message && (err.message.includes('HTTP Error 401') || err.message.includes('HTTP Error 403') || err.message.includes('HTTP Error 404'))) {
+        console.error('CoSync: Permanent error resolving document ID from server:', err);
+        throw err;
+      }
       console.warn('CoSync: Error resolving document ID from server. Falling back to local ID:', err);
       return this.getDocumentIdForFile(file);
     }
@@ -1060,7 +1064,16 @@ class CoSyncPlugin extends Plugin {
     const initialFileContent = await this.app.vault.read(file);
 
     // Resolve the real documentId from the server
-    const documentId = await this.resolveDocumentId(file);
+    let documentId: string;
+    try {
+      documentId = await this.resolveDocumentId(file);
+    } catch (err: any) {
+      console.error('CoSync: Failed to resolve document ID:', err);
+      this.updateStatusBar('disconnected', 'CoSync: Connection Error');
+      this.logEvent('error', `Connection failed: ${err.message || err}`);
+      return;
+    }
+
     if (this.activeFile !== file) {
       // The user switched files while we were waiting for the server
       return;
