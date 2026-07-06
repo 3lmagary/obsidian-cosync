@@ -10402,6 +10402,18 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
   hasProgrammedModification(path) {
     return this.programmedModifications.has(path.normalize("NFC"));
   }
+  getUniqueFilePath(path) {
+    const dotIndex = path.lastIndexOf(".");
+    const base = dotIndex !== -1 ? path.substring(0, dotIndex) : path;
+    const ext = dotIndex !== -1 ? path.substring(dotIndex + 1) : "";
+    let counter = 1;
+    let uniquePath = path;
+    while (this.settings.fileMappings[uniquePath] || this.app.vault.getAbstractFileByPath(uniquePath)) {
+      uniquePath = ext ? `${base} ${counter}.${ext}` : `${base} ${counter}`;
+      counter++;
+    }
+    return uniquePath;
+  }
   updateSidebarViews() {
     const leaves = this.app.workspace.getLeavesOfType(COSYNC_VIEW_TYPE);
     leaves.forEach((leaf) => {
@@ -11674,6 +11686,10 @@ ${localContent}
       for (const [filePath, docId] of Object.entries(this.settings.fileMappings)) {
         const filePathNormalized = filePath.normalize("NFC");
         if (!serverDocIds.has(docId)) {
+          if (this.activeDocumentId === docId) {
+            console.log(`CoSync: Active document "${filePathNormalized}" was deleted on server. Disconnecting active room...`);
+            await this.disconnectActive();
+          }
           const localFile = localSyncableMap.get(filePathNormalized.toLowerCase());
           if (localFile && this.app.vault.getAbstractFileByPath(localFile.path)) {
             try {
@@ -11912,20 +11928,34 @@ ${localContent}
             expectedPath = expectedPath.endsWith(".md") ? expectedPath : `${expectedPath}.md`;
             isMarkdown = true;
           }
-          const fileExists = localSyncableMap.has(expectedPath.toLowerCase());
-          if (!fileExists) {
-            console.log(`CoSync: Document "${docTitleNormalized}" is missing locally. Downloading...`);
+          const isAlreadyMapped = this.settings.fileMappings[expectedPath];
+          if (isAlreadyMapped) {
+            const uniquePath = this.getUniqueFilePath(expectedPath);
+            console.log(`CoSync: Duplicate title mapping conflict for "${expectedPath}". Downloading as "${uniquePath}"...`);
             try {
-              await this.downloadNewDocFromServer(doc2.id, expectedPath, isMarkdown);
+              await this.downloadNewDocFromServer(doc2.id, uniquePath, isMarkdown);
               downloadedCount++;
-              this.logEvent("success", `Downloaded missing note "${expectedPath}"`);
+              this.logEvent("success", `Downloaded duplicate server document as "${uniquePath}"`);
             } catch (err) {
-              this.logEvent("error", `Failed to download server document "${docTitleNormalized}": ${err.message || err}`);
-              errors.push(`Failed to download server document "${docTitleNormalized}": ${err.message || err}`);
+              this.logEvent("error", `Failed to download duplicate server document: ${err.message || err}`);
+              errors.push(`Failed to download duplicate server document: ${err.message || err}`);
             }
           } else {
-            const matchedFile = localSyncableMap.get(expectedPath.toLowerCase());
-            this.settings.fileMappings[matchedFile.path.normalize("NFC")] = doc2.id;
+            const fileExists = localSyncableMap.has(expectedPath.toLowerCase());
+            if (!fileExists) {
+              console.log(`CoSync: Document "${docTitleNormalized}" is missing locally. Downloading...`);
+              try {
+                await this.downloadNewDocFromServer(doc2.id, expectedPath, isMarkdown);
+                downloadedCount++;
+                this.logEvent("success", `Downloaded missing note "${expectedPath}"`);
+              } catch (err) {
+                this.logEvent("error", `Failed to download server document "${docTitleNormalized}": ${err.message || err}`);
+                errors.push(`Failed to download server document "${docTitleNormalized}": ${err.message || err}`);
+              }
+            } else {
+              const matchedFile = localSyncableMap.get(expectedPath.toLowerCase());
+              this.settings.fileMappings[matchedFile.path.normalize("NFC")] = doc2.id;
+            }
           }
         }
       }
