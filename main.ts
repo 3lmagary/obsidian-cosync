@@ -1746,14 +1746,18 @@ class CoSyncPlugin extends Plugin {
 
       // --- STEP A: Sync Documents (Text, Canvas, JSON, Excalidraw) ---
       for (let file of localSyncable) {
+        let normalizedFilePath = file.path.normalize('NFC');
         // Skip log file itself to avoid self-sync loop
-        if (file.path.normalize('NFC') === 'cosync-sync-log.md') continue;
+        if (normalizedFilePath === 'cosync-sync-log.md') continue;
+
+        if (filesDeletedDuringSync.has(normalizedFilePath)) {
+          continue;
+        }
 
         if (!this.app.vault.getAbstractFileByPath(file.path)) {
           continue;
         }
 
-        let normalizedFilePath = file.path.normalize('NFC');
         const isMarkdown = file.extension.toLowerCase() === 'md';
         const title = isMarkdown ? (normalizedFilePath.endsWith('.md') ? normalizedFilePath.slice(0, -3) : normalizedFilePath) : normalizedFilePath;
 
@@ -1963,11 +1967,14 @@ class CoSyncPlugin extends Plugin {
       // --- STEP B: Sync Attachments (Binary files like PNG, PDF, JPG) ---
       // Upload missing/modified attachments
       for (const file of localBinary) {
+        const normalizedFilePath = file.path.normalize('NFC');
+        if (filesDeletedDuringSync.has(normalizedFilePath)) {
+          continue;
+        }
         if (!this.app.vault.getAbstractFileByPath(file.path)) {
           continue;
         }
         try {
-          const normalizedFilePath = file.path.normalize('NFC');
           const cooldownTime = this.downloadedFilesCooldown.get(normalizedFilePath.toLowerCase());
           if (cooldownTime && (Date.now() - cooldownTime < 4000)) {
             console.log(`CoSync: Skipping upload of recently downloaded file under cooldown: ${normalizedFilePath}`);

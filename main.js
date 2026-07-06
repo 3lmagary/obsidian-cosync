@@ -11753,11 +11753,14 @@ ${localContent}
       }
       await this.saveData(this.settings);
       for (let file of localSyncable) {
-        if (file.path.normalize("NFC") === "cosync-sync-log.md") continue;
+        let normalizedFilePath = file.path.normalize("NFC");
+        if (normalizedFilePath === "cosync-sync-log.md") continue;
+        if (filesDeletedDuringSync.has(normalizedFilePath)) {
+          continue;
+        }
         if (!this.app.vault.getAbstractFileByPath(file.path)) {
           continue;
         }
-        let normalizedFilePath = file.path.normalize("NFC");
         const isMarkdown = file.extension.toLowerCase() === "md";
         const title = isMarkdown ? normalizedFilePath.endsWith(".md") ? normalizedFilePath.slice(0, -3) : normalizedFilePath : normalizedFilePath;
         let docId = this.settings.fileMappings[normalizedFilePath];
@@ -11927,11 +11930,14 @@ ${localContent}
         }
       }
       for (const file of localBinary) {
+        const normalizedFilePath = file.path.normalize("NFC");
+        if (filesDeletedDuringSync.has(normalizedFilePath)) {
+          continue;
+        }
         if (!this.app.vault.getAbstractFileByPath(file.path)) {
           continue;
         }
         try {
-          const normalizedFilePath = file.path.normalize("NFC");
           const cooldownTime = this.downloadedFilesCooldown.get(normalizedFilePath.toLowerCase());
           if (cooldownTime && Date.now() - cooldownTime < 4e3) {
             console.log(`CoSync: Skipping upload of recently downloaded file under cooldown: ${normalizedFilePath}`);
@@ -11968,9 +11974,9 @@ ${localContent}
             }
           }
         } catch (err) {
-          const normalizedFilePath = file.path.normalize("NFC");
-          this.logEvent("error", `Failed to upload attachment "${normalizedFilePath}": ${err.message || err}`);
-          errors.push(`Failed to upload attachment "${normalizedFilePath}": ${err.message || err}`);
+          const normalizedFilePath2 = file.path.normalize("NFC");
+          this.logEvent("error", `Failed to upload attachment "${normalizedFilePath2}": ${err.message || err}`);
+          errors.push(`Failed to upload attachment "${normalizedFilePath2}": ${err.message || err}`);
         }
       }
       for (const attach of serverAttachments) {
