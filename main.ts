@@ -1540,11 +1540,16 @@ class CoSyncPlugin extends Plugin {
       const localSyncable = localFiles.filter(f => {
         const pathNormalized = f.path.normalize('NFC');
         if (pathNormalized === 'cosync-sync-log.md') return false;
+        const fileName = pathNormalized.split('/').pop()?.toLowerCase() || '';
+        if (fileName.startsWith('untitled')) return false;
         const pathLower = f.path.toLowerCase();
         if (pathLower.endsWith('.excalidraw.md')) return false;
         return SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
       });
       const localBinary = localFiles.filter(f => {
+        const pathNormalized = f.path.normalize('NFC');
+        const fileName = pathNormalized.split('/').pop()?.toLowerCase() || '';
+        if (fileName.startsWith('untitled')) return false;
         const pathLower = f.path.toLowerCase();
         if (pathLower.endsWith('.excalidraw.md')) return true;
         return !SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
@@ -1935,10 +1940,15 @@ class CoSyncPlugin extends Plugin {
       // Identify missing local files that exist on server
       for (const doc of serverDocs) {
         const docTitleNormalized = doc.title.normalize('NFC');
-        if (docTitleNormalized.toLowerCase() === 'cosync-sync-log' || docTitleNormalized.toLowerCase() === 'cosync-sync-log.md') {
+        const docTitleLower = docTitleNormalized.toLowerCase();
+        const docFileName = docTitleLower.split('/').pop() || '';
+        if (docFileName.startsWith('untitled')) {
           continue;
         }
-        if (docTitleNormalized.toLowerCase().endsWith('.excalidraw.md') || docTitleNormalized.toLowerCase().endsWith('.excalidraw')) {
+        if (docTitleLower === 'cosync-sync-log' || docTitleLower === 'cosync-sync-log.md') {
+          continue;
+        }
+        if (docTitleLower.endsWith('.excalidraw.md') || docTitleLower.endsWith('.excalidraw')) {
           continue;
         }
         // If we don't have this doc mapped to any local file path

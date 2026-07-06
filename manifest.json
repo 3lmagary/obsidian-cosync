@@ -1,7 +1,7 @@
 {
   "id": "obsidian-cosync",
   "name": "Obsidian CoSync",
-  "version": "1.4.6",
+  "version": "1.4.7",
   "minAppVersion": "0.15.0",
   "description": "Real-time collaborative synchronization using Yjs and WebSockets.",
   "author": "3lmagary",
