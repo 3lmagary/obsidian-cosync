@@ -11569,6 +11569,8 @@ ${localContent}
       const serverAttachMap = new Map(serverAttachments.map((a) => [a.filepath.toLowerCase(), a]));
       const localFiles = this.app.vault.getFiles();
       const localSyncable = localFiles.filter((f) => {
+        const pathNormalized = f.path.normalize("NFC");
+        if (pathNormalized === "cosync-sync-log.md") return false;
         const pathLower = f.path.toLowerCase();
         if (pathLower.endsWith(".excalidraw.md")) return false;
         return SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
@@ -11904,13 +11906,17 @@ ${localContent}
         }
       }
       for (const doc2 of serverDocs) {
-        if (doc2.title.toLowerCase().endsWith(".excalidraw.md") || doc2.title.toLowerCase().endsWith(".excalidraw")) {
+        const docTitleNormalized = doc2.title.normalize("NFC");
+        if (docTitleNormalized.toLowerCase() === "cosync-sync-log" || docTitleNormalized.toLowerCase() === "cosync-sync-log.md") {
+          continue;
+        }
+        if (docTitleNormalized.toLowerCase().endsWith(".excalidraw.md") || docTitleNormalized.toLowerCase().endsWith(".excalidraw")) {
           continue;
         }
         const isMapped = Object.values(this.settings.fileMappings).includes(doc2.id);
         if (!isMapped) {
-          const docTitleNormalized = doc2.title.normalize("NFC");
-          const lowerTitle = docTitleNormalized.toLowerCase();
+          const docTitleNormalized2 = doc2.title.normalize("NFC");
+          const lowerTitle = docTitleNormalized2.toLowerCase();
           const pathParts = lowerTitle.split("/");
           const fileName = pathParts[pathParts.length - 1];
           const fileParts = fileName.split(".");
@@ -11918,7 +11924,7 @@ ${localContent}
           if (ext && !SYNCABLE_EXTENSIONS.has(ext)) {
             continue;
           }
-          let expectedPath = docTitleNormalized;
+          let expectedPath = docTitleNormalized2;
           let isMarkdown = false;
           if (ext === "txt") {
             isMarkdown = false;
@@ -11936,21 +11942,31 @@ ${localContent}
               await this.downloadNewDocFromServer(doc2.id, uniquePath, isMarkdown);
               downloadedCount++;
               this.logEvent("success", `Downloaded duplicate server document as "${uniquePath}"`);
+              const cleanTitle = isMarkdown ? uniquePath.endsWith(".md") ? uniquePath.slice(0, -3) : uniquePath : uniquePath;
+              console.log(`CoSync: Updating server document title for duplicate to "${cleanTitle}"...`);
+              await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${doc2.id}`, {
+                method: "PUT",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${this.settings.token}`
+                },
+                body: JSON.stringify({ title: cleanTitle })
+              });
             } catch (err) {
-              this.logEvent("error", `Failed to download duplicate server document: ${err.message || err}`);
-              errors.push(`Failed to download duplicate server document: ${err.message || err}`);
+              this.logEvent("error", `Failed to download or rename duplicate server document: ${err.message || err}`);
+              errors.push(`Failed to download or rename duplicate server document: ${err.message || err}`);
             }
           } else {
             const fileExists = localSyncableMap.has(expectedPath.toLowerCase());
             if (!fileExists) {
-              console.log(`CoSync: Document "${docTitleNormalized}" is missing locally. Downloading...`);
+              console.log(`CoSync: Document "${docTitleNormalized2}" is missing locally. Downloading...`);
               try {
                 await this.downloadNewDocFromServer(doc2.id, expectedPath, isMarkdown);
                 downloadedCount++;
                 this.logEvent("success", `Downloaded missing note "${expectedPath}"`);
               } catch (err) {
-                this.logEvent("error", `Failed to download server document "${docTitleNormalized}": ${err.message || err}`);
-                errors.push(`Failed to download server document "${docTitleNormalized}": ${err.message || err}`);
+                this.logEvent("error", `Failed to download server document "${docTitleNormalized2}": ${err.message || err}`);
+                errors.push(`Failed to download server document "${docTitleNormalized2}": ${err.message || err}`);
               }
             } else {
               const matchedFile = localSyncableMap.get(expectedPath.toLowerCase());

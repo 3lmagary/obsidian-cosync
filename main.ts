@@ -1538,6 +1538,8 @@ class CoSyncPlugin extends Plugin {
       // 3. Scan local files
       const localFiles = this.app.vault.getFiles();
       const localSyncable = localFiles.filter(f => {
+        const pathNormalized = f.path.normalize('NFC');
+        if (pathNormalized === 'cosync-sync-log.md') return false;
         const pathLower = f.path.toLowerCase();
         if (pathLower.endsWith('.excalidraw.md')) return false;
         return SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
@@ -1932,7 +1934,11 @@ class CoSyncPlugin extends Plugin {
 
       // Identify missing local files that exist on server
       for (const doc of serverDocs) {
-        if (doc.title.toLowerCase().endsWith('.excalidraw.md') || doc.title.toLowerCase().endsWith('.excalidraw')) {
+        const docTitleNormalized = doc.title.normalize('NFC');
+        if (docTitleNormalized.toLowerCase() === 'cosync-sync-log' || docTitleNormalized.toLowerCase() === 'cosync-sync-log.md') {
+          continue;
+        }
+        if (docTitleNormalized.toLowerCase().endsWith('.excalidraw.md') || docTitleNormalized.toLowerCase().endsWith('.excalidraw')) {
           continue;
         }
         // If we don't have this doc mapped to any local file path
@@ -1973,9 +1979,21 @@ class CoSyncPlugin extends Plugin {
               await this.downloadNewDocFromServer(doc.id, uniquePath, isMarkdown);
               downloadedCount++;
               this.logEvent('success', `Downloaded duplicate server document as "${uniquePath}"`);
+
+              // Update the server document title to match the unique path
+              const cleanTitle = isMarkdown ? (uniquePath.endsWith('.md') ? uniquePath.slice(0, -3) : uniquePath) : uniquePath;
+              console.log(`CoSync: Updating server document title for duplicate to "${cleanTitle}"...`);
+              await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${doc.id}`, {
+                method: 'PUT',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${this.settings.token}`
+                },
+                body: JSON.stringify({ title: cleanTitle })
+              });
             } catch (err: any) {
-              this.logEvent('error', `Failed to download duplicate server document: ${err.message || err}`);
-              errors.push(`Failed to download duplicate server document: ${err.message || err}`);
+              this.logEvent('error', `Failed to download or rename duplicate server document: ${err.message || err}`);
+              errors.push(`Failed to download or rename duplicate server document: ${err.message || err}`);
             }
           } else {
             const fileExists = localSyncableMap.has(expectedPath.toLowerCase());
