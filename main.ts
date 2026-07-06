@@ -61,7 +61,11 @@ class CoSyncPlugin extends Plugin {
   private programmedModifications: Set<string> = new Set();
 
   private addProgrammedModification(path: string) {
-    this.programmedModifications.add(path.normalize('NFC'));
+    const normalized = path.normalize('NFC');
+    this.programmedModifications.add(normalized);
+    setTimeout(() => {
+      this.programmedModifications.delete(normalized);
+    }, 3000); // Auto-expire after 3 seconds to prevent flags from staying dirty forever
   }
 
   private deleteProgrammedModification(path: string) {

@@ -10390,7 +10390,11 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.recentLogs = [];
   }
   addProgrammedModification(path) {
-    this.programmedModifications.add(path.normalize("NFC"));
+    const normalized = path.normalize("NFC");
+    this.programmedModifications.add(normalized);
+    setTimeout(() => {
+      this.programmedModifications.delete(normalized);
+    }, 3e3);
   }
   deleteProgrammedModification(path) {
     this.programmedModifications.delete(path.normalize("NFC"));
