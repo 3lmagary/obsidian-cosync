@@ -2260,13 +2260,15 @@ class CoSyncPlugin extends Plugin {
                 this.settings.syncVersions[docId] = serverVersion;
               }
             } else {
+              const lastSyncedVersion = this.settings.syncVersions[docId] || 0;
               if (localContent === serverContentWithId) {
                 await this.markDocumentSynced(docId, localContent, localHash);
-                this.settings.syncVersions[docId] = serverVersion;
+                this.settings.syncVersions[docId] = Math.max(serverVersion, lastSyncedVersion);
                 outcome = 'none';
               } else {
-                const localChanged = localHash !== lastSyncedHash;
-                const serverChanged = serverHash !== lastSyncedHash;
+                const isServerReset = serverVersion < lastSyncedVersion;
+                const localChanged = (localHash !== lastSyncedHash) || isServerReset;
+                const serverChanged = !isServerReset && (serverHash !== lastSyncedHash);
 
                 if (localChanged && !serverChanged) {
                 tempYDoc.transact(() => {
