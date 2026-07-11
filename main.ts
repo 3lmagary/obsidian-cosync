@@ -18,6 +18,7 @@ interface CoSyncSettings {
   syncInterval: number;
   enableBackgroundSync: boolean;
   syncConfig: boolean;
+  deletedFilesQueue?: string[];
 }
 
 const DEFAULT_SETTINGS: CoSyncSettings = {
@@ -32,7 +33,8 @@ const DEFAULT_SETTINGS: CoSyncSettings = {
   showManualSettings: false,
   syncInterval: 10,
   enableBackgroundSync: true,
-  syncConfig: false
+  syncConfig: false,
+  deletedFilesQueue: []
 };
 
 const SYNCABLE_EXTENSIONS = new Set(['md', 'txt']);
@@ -294,11 +296,25 @@ class CoSyncPlugin extends Plugin {
         const normalizedPath = file.path.normalize('NFC');
         if (normalizedPath.startsWith('.')) return;
         if (normalizedPath === 'cosync-sync-log.md') return;
+        
+        let isProgrammed = false;
         if (this.hasProgrammedModification(normalizedPath)) {
           this.deleteProgrammedModification(normalizedPath);
-          return;
+          isProgrammed = true;
         }
-        if (this.isApplyingRemoteUpdate) return;
+        if (this.isApplyingRemoteUpdate) {
+          isProgrammed = true;
+        }
+        if (isProgrammed) return;
+
+        if (!this.settings.deletedFilesQueue) {
+          this.settings.deletedFilesQueue = [];
+        }
+        if (!this.settings.deletedFilesQueue.includes(normalizedPath)) {
+          this.settings.deletedFilesQueue.push(normalizedPath);
+          this.saveSettings();
+        }
+
         if (this.isSyncing) return;
         if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
         this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
@@ -1454,6 +1470,9 @@ class CoSyncPlugin extends Plugin {
       }
       this.settings.fileMappings = normalizedFileMappings;
     }
+    if (!this.settings.deletedFilesQueue) {
+      this.settings.deletedFilesQueue = [];
+    }
   }
 
   async saveSettings() {
@@ -1617,12 +1636,15 @@ class CoSyncPlugin extends Plugin {
 
       // --- PHASE 0: Two-Way Deletion Sync ---
 
-      // 0A. Propagate Local Deletions to Server
-      for (const [filePath, docId] of Object.entries(this.settings.fileMappings)) {
+      // 0A. Propagate Local Deletions to Server (using queue-based deletion to prevent rename race conditions)
+      const deletedQueue = this.settings.deletedFilesQueue || [];
+      const remainingDeletedQueue: string[] = [];
+
+      for (const filePath of deletedQueue) {
         const filePathNormalized = filePath.normalize('NFC');
-        const ext = filePathNormalized.split('.').pop()?.toLowerCase();
-        const isMarkdown = ext && SYNCABLE_EXTENSIONS.has(ext);
-        if (isMarkdown && !localSyncableMap.has(filePathNormalized.toLowerCase())) {
+        const docId = this.settings.fileMappings[filePathNormalized];
+        
+        if (docId) {
           console.log(`CoSync: Document "${filePathNormalized}" was deleted locally. Deleting on server...`);
           try {
             const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`, {
@@ -1631,47 +1653,55 @@ class CoSyncPlugin extends Plugin {
             });
             if (res.ok) {
               deletedCount++;
-              this.logEvent('success', `Deleted server document for note "${filePath}"`);
+              this.logEvent('success', `Deleted server document for note "${filePathNormalized}"`);
               serverDocs = serverDocs.filter(d => d.id !== docId);
+            } else if (res.status === 404) {
+              this.logEvent('info', `Server document for "${filePathNormalized}" already deleted (404)`);
             } else {
-              this.logEvent('error', `Failed to delete server document for "${filePath}": HTTP ${res.status}`);
-              errors.push(`Failed to delete server document for "${filePath}": HTTP ${res.status}`);
+              this.logEvent('error', `Failed to delete server document for "${filePathNormalized}": HTTP ${res.status}`);
+              errors.push(`Failed to delete server document for "${filePathNormalized}": HTTP ${res.status}`);
+              remainingDeletedQueue.push(filePathNormalized);
             }
           } catch (err: any) {
-            this.logEvent('error', `Failed to delete server document for "${filePath}": ${err.message || err}`);
-            errors.push(`Failed to delete server document for "${filePath}": ${err.message || err}`);
+            this.logEvent('error', `Failed to delete server document for "${filePathNormalized}": ${err.message || err}`);
+            errors.push(`Failed to delete server document for "${filePathNormalized}": ${err.message || err}`);
+            remainingDeletedQueue.push(filePathNormalized);
           }
-          delete this.settings.fileMappings[filePath];
+          delete this.settings.fileMappings[filePathNormalized];
           delete this.settings.syncHashes[docId];
           delete this.settings.syncVersions[docId];
-        }
-      }
-
-      for (const [filePath, lastHash] of Object.entries(this.settings.syncHashes)) {
-        const filePathNormalized = filePath.normalize('NFC');
-        const isMarkdown = (filePathNormalized.endsWith('.md') && !filePathNormalized.toLowerCase().endsWith('.excalidraw.md')) || filePathNormalized.endsWith('.txt') || filePathNormalized.startsWith('doc_') || filePathNormalized.startsWith('obs-');
-        if (!isMarkdown && !localBinaryMap.has(filePathNormalized.toLowerCase())) {
-          console.log(`CoSync: Attachment "${filePathNormalized}" was deleted locally. Deleting on server...`);
-          try {
-            const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments?filepath=${encodeURIComponent(filePathNormalized)}`, {
-              method: 'DELETE',
-              headers: { 'Authorization': `Bearer ${this.settings.token}` }
-            });
-            if (res.ok) {
-              deletedCount++;
-              this.logEvent('success', `Deleted server attachment "${filePathNormalized}"`);
-              serverAttachments = serverAttachments.filter(a => a.filepath.normalize('NFC').toLowerCase() !== filePathNormalized.toLowerCase());
-            } else {
-              this.logEvent('error', `Failed to delete server attachment for "${filePathNormalized}": HTTP ${res.status}`);
-              errors.push(`Failed to delete server attachment for "${filePathNormalized}": HTTP ${res.status}`);
+        } else {
+          // If it's not a document, check if it was an attachment
+          const lastHash = this.settings.syncHashes[filePathNormalized];
+          if (lastHash) {
+            console.log(`CoSync: Attachment "${filePathNormalized}" was deleted locally. Deleting on server...`);
+            try {
+              const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments?filepath=${encodeURIComponent(filePathNormalized)}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${this.settings.token}` }
+              });
+              if (res.ok) {
+                deletedCount++;
+                this.logEvent('success', `Deleted server attachment "${filePathNormalized}"`);
+                serverAttachments = serverAttachments.filter(a => a.filepath.normalize('NFC').toLowerCase() !== filePathNormalized.toLowerCase());
+              } else if (res.status === 404) {
+                this.logEvent('info', `Server attachment for "${filePathNormalized}" already deleted (404)`);
+              } else {
+                this.logEvent('error', `Failed to delete server attachment for "${filePathNormalized}": HTTP ${res.status}`);
+                errors.push(`Failed to delete server attachment for "${filePathNormalized}": HTTP ${res.status}`);
+                remainingDeletedQueue.push(filePathNormalized);
+              }
+            } catch (err: any) {
+              this.logEvent('error', `Failed to delete server attachment for "${filePathNormalized}": ${err.message || err}`);
+              errors.push(`Failed to delete server attachment for "${filePathNormalized}": ${err.message || err}`);
+              remainingDeletedQueue.push(filePathNormalized);
             }
-          } catch (err: any) {
-            this.logEvent('error', `Failed to delete server attachment for "${filePathNormalized}": ${err.message || err}`);
-            errors.push(`Failed to delete server attachment for "${filePathNormalized}": ${err.message || err}`);
+            delete this.settings.syncHashes[filePathNormalized];
           }
-          delete this.settings.syncHashes[filePath];
         }
       }
+      this.settings.deletedFilesQueue = remainingDeletedQueue;
+      await this.saveSettings();
 
       // 0B. Propagate Server Deletions to Local
       const serverDocIds = new Set(serverDocs.map(d => d.id));
