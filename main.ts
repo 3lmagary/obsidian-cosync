@@ -343,12 +343,20 @@ class CoSyncPlugin extends Plugin {
         const renamesToSync: { docId: string; newPath: string }[] = [];
 
         if (file instanceof TFile) {
+          // If it is a note, update fileMappings and rename on server
           if (this.settings.fileMappings?.[oldPathNormalized]) {
             const docId = this.settings.fileMappings[oldPathNormalized];
             this.settings.fileMappings[normalizedPath] = docId;
             delete this.settings.fileMappings[oldPathNormalized];
             changed = true;
             renamesToSync.push({ docId, newPath: normalizedPath });
+          } else if (this.settings.syncHashes?.[oldPathNormalized]) {
+            // If it is an attachment, update syncHashes and rename on server
+            const lastHash = this.settings.syncHashes[oldPathNormalized];
+            this.settings.syncHashes[normalizedPath] = lastHash;
+            delete this.settings.syncHashes[oldPathNormalized];
+            changed = true;
+            this.renameServerAttachment(oldPathNormalized, normalizedPath);
           }
         } else if (file instanceof TFolder) {
           // A folder was renamed/moved. Recursively update all file mappings inside it.
@@ -369,10 +377,22 @@ class CoSyncPlugin extends Plugin {
               }
             }
           }
-          // Note: syncHashes for attachments are not updated here.
-          // By letting syncHashes keep the old attachment paths, the sync engine will
-          // see them as deleted locally, delete them on the server, and upload them
-          // under the new path, which prevents duplicate attachments on other devices.
+
+          // Recursively update all attachment syncHashes and rename them on the server
+          if (this.settings.syncHashes) {
+            for (const [path, lastHash] of Object.entries(this.settings.syncHashes)) {
+              const pathNormalized = path.normalize('NFC');
+              if (pathNormalized.startsWith(oldPrefix)) {
+                const newPath = newPrefix + pathNormalized.substring(oldPrefix.length);
+                this.settings.syncHashes[newPath] = lastHash;
+                if (pathNormalized !== newPath) {
+                  delete this.settings.syncHashes[path];
+                }
+                changed = true;
+                this.renameServerAttachment(pathNormalized, newPath);
+              }
+            }
+          }
         }
 
         if (changed) {
@@ -410,6 +430,24 @@ class CoSyncPlugin extends Plugin {
     this.startPeriodicSync();
     // Also run once immediately on load
     setTimeout(() => this.syncVault(), 2000);
+  }
+
+  private async renameServerAttachment(oldFilepath: string, newFilepath: string): Promise<void> {
+    try {
+      const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/rename`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.settings.token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ oldFilepath, newFilepath })
+      });
+      if (!res.ok) {
+        console.warn(`CoSync: Server failed to rename attachment from "${oldFilepath}" to "${newFilepath}": HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.error(`CoSync: Error renaming attachment on server:`, err);
+    }
   }
 
   public startPeriodicSync() {
@@ -2169,6 +2207,58 @@ class CoSyncPlugin extends Plugin {
           }
 
           if (needsDownload) {
+            let wasRenamed = false;
+            if (!localFile) {
+              const serverAttachPathsLower = new Set(serverAttachments.map(a => a.filepath.toLowerCase()));
+              for (const [localPath, localF] of localBinaryMap.entries()) {
+                if (!serverAttachPathsLower.has(localPath)) {
+                  try {
+                    const localBuf = await this.readLocalBinary(localF.path);
+                    if (this.verifyAttachmentHashMatch(localF.path, localBuf, attach.hash)) {
+                      console.log(`CoSync: Synced server rename of attachment: "${localF.path}" -> "${normalizedAttachPath}"`);
+                      
+                      // Ensure parent folders exist
+                      const pathParts = normalizedAttachPath.split('/');
+                      if (pathParts.length > 1) {
+                        let currentFolderPath = '';
+                        for (let i = 0; i < pathParts.length - 1; i++) {
+                          currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts[i]}` : pathParts[i];
+                          if (!(await this.app.vault.adapter.exists(currentFolderPath))) {
+                            await this.app.vault.createFolder(currentFolderPath);
+                          }
+                        }
+                      }
+                      
+                      this.isApplyingRemoteUpdate = true;
+                      this.addProgrammedModification(normalizedAttachPath);
+                      this.addProgrammedModification(localF.path);
+                      try {
+                        await this.app.vault.rename(localF, normalizedAttachPath);
+                        this.settings.syncHashes[normalizedAttachPath] = attach.hash;
+                        delete this.settings.syncHashes[localF.path];
+                        
+                        localBinaryMap.delete(localPath);
+                        localBinaryMap.set(normalizedAttachPath.toLowerCase(), localF);
+                        wasRenamed = true;
+                        needsDownload = false;
+                        downloadedCount++;
+                        this.logEvent('info', `Renamed local attachment "${localF.path}" to "${normalizedAttachPath}" (synced server rename)`);
+                      } finally {
+                        this.isApplyingRemoteUpdate = false;
+                      }
+                      break;
+                    }
+                  } catch (e) {
+                    // Ignore errors, download normally
+                  }
+                }
+              }
+            }
+
+            if (wasRenamed) {
+              continue;
+            }
+
             console.log(`CoSync: Downloading background attachment "${normalizedAttachPath}" (size=${attach.size} bytes)...`);
             
             // Create parent folders if needed

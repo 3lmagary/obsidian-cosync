@@ -10592,6 +10592,12 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             delete this.settings.fileMappings[oldPathNormalized];
             changed = true;
             renamesToSync.push({ docId, newPath: normalizedPath });
+          } else if (this.settings.syncHashes?.[oldPathNormalized]) {
+            const lastHash = this.settings.syncHashes[oldPathNormalized];
+            this.settings.syncHashes[normalizedPath] = lastHash;
+            delete this.settings.syncHashes[oldPathNormalized];
+            changed = true;
+            this.renameServerAttachment(oldPathNormalized, normalizedPath);
           }
         } else if (file instanceof import_obsidian.TFolder) {
           const oldPrefix = oldPathNormalized + "/";
@@ -10607,6 +10613,20 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
                 }
                 changed = true;
                 renamesToSync.push({ docId, newPath });
+              }
+            }
+          }
+          if (this.settings.syncHashes) {
+            for (const [path, lastHash] of Object.entries(this.settings.syncHashes)) {
+              const pathNormalized = path.normalize("NFC");
+              if (pathNormalized.startsWith(oldPrefix)) {
+                const newPath = newPrefix + pathNormalized.substring(oldPrefix.length);
+                this.settings.syncHashes[newPath] = lastHash;
+                if (pathNormalized !== newPath) {
+                  delete this.settings.syncHashes[path];
+                }
+                changed = true;
+                this.renameServerAttachment(pathNormalized, newPath);
               }
             }
           }
@@ -10639,6 +10659,23 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     });
     this.startPeriodicSync();
     setTimeout(() => this.syncVault(), 2e3);
+  }
+  async renameServerAttachment(oldFilepath, newFilepath) {
+    try {
+      const res = await fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/rename`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.settings.token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ oldFilepath, newFilepath })
+      });
+      if (!res.ok) {
+        console.warn(`CoSync: Server failed to rename attachment from "${oldFilepath}" to "${newFilepath}": HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.error(`CoSync: Error renaming attachment on server:`, err);
+    }
   }
   startPeriodicSync() {
     if (this.syncTimer) {
@@ -12080,6 +12117,51 @@ ${localContent}
             }
           }
           if (needsDownload) {
+            let wasRenamed = false;
+            if (!localFile) {
+              const serverAttachPathsLower = new Set(serverAttachments.map((a) => a.filepath.toLowerCase()));
+              for (const [localPath, localF] of localBinaryMap.entries()) {
+                if (!serverAttachPathsLower.has(localPath)) {
+                  try {
+                    const localBuf = await this.readLocalBinary(localF.path);
+                    if (this.verifyAttachmentHashMatch(localF.path, localBuf, attach.hash)) {
+                      console.log(`CoSync: Synced server rename of attachment: "${localF.path}" -> "${normalizedAttachPath}"`);
+                      const pathParts2 = normalizedAttachPath.split("/");
+                      if (pathParts2.length > 1) {
+                        let currentFolderPath = "";
+                        for (let i = 0; i < pathParts2.length - 1; i++) {
+                          currentFolderPath = currentFolderPath ? `${currentFolderPath}/${pathParts2[i]}` : pathParts2[i];
+                          if (!await this.app.vault.adapter.exists(currentFolderPath)) {
+                            await this.app.vault.createFolder(currentFolderPath);
+                          }
+                        }
+                      }
+                      this.isApplyingRemoteUpdate = true;
+                      this.addProgrammedModification(normalizedAttachPath);
+                      this.addProgrammedModification(localF.path);
+                      try {
+                        await this.app.vault.rename(localF, normalizedAttachPath);
+                        this.settings.syncHashes[normalizedAttachPath] = attach.hash;
+                        delete this.settings.syncHashes[localF.path];
+                        localBinaryMap.delete(localPath);
+                        localBinaryMap.set(normalizedAttachPath.toLowerCase(), localF);
+                        wasRenamed = true;
+                        needsDownload = false;
+                        downloadedCount++;
+                        this.logEvent("info", `Renamed local attachment "${localF.path}" to "${normalizedAttachPath}" (synced server rename)`);
+                      } finally {
+                        this.isApplyingRemoteUpdate = false;
+                      }
+                      break;
+                    }
+                  } catch (e) {
+                  }
+                }
+              }
+            }
+            if (wasRenamed) {
+              continue;
+            }
             console.log(`CoSync: Downloading background attachment "${normalizedAttachPath}" (size=${attach.size} bytes)...`);
             const pathParts = normalizedAttachPath.split("/");
             if (pathParts.length > 1) {
