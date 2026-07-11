@@ -10756,7 +10756,8 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     if (!filePath.startsWith(".") && isText) {
       const text2 = await this.app.vault.adapter.read(filePath);
       const normalizedText = text2.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-      return new TextEncoder().encode(normalizedText).buffer;
+      const uint8 = new TextEncoder().encode(normalizedText);
+      return uint8.buffer.slice(uint8.byteOffset, uint8.byteOffset + uint8.byteLength);
     }
     return await this.app.vault.adapter.readBinary(filePath);
   }
@@ -10770,8 +10771,12 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         const text2 = new TextDecoder().decode(localBuffer);
         const lfText = text2.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
         const crlfText = lfText.replace(/\n/g, "\r\n");
-        const lfHash = getBinaryHash(new TextEncoder().encode(lfText).buffer);
-        const crlfHash = getBinaryHash(new TextEncoder().encode(crlfText).buffer);
+        const lfUint8 = new TextEncoder().encode(lfText);
+        const crlfUint8 = new TextEncoder().encode(crlfText);
+        const lfBuffer = lfUint8.buffer.slice(lfUint8.byteOffset, lfUint8.byteOffset + lfUint8.byteLength);
+        const crlfBuffer = crlfUint8.buffer.slice(crlfUint8.byteOffset, crlfUint8.byteOffset + crlfUint8.byteLength);
+        const lfHash = getBinaryHash(lfBuffer);
+        const crlfHash = getBinaryHash(crlfBuffer);
         return serverHash === lfHash || serverHash === crlfHash;
       } catch (e) {
       }
