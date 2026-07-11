@@ -10747,11 +10747,14 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     return lp.endsWith(".excalidraw.md") || lp.endsWith(".excalidraw");
   }
   async readLocalBinary(filePath) {
-    if (!filePath.startsWith(".") && this.isExcalidrawFile(filePath)) {
+    const pathLower = filePath.toLowerCase();
+    const isText = this.isExcalidrawFile(filePath) || pathLower.endsWith(".txt") || pathLower.endsWith(".json") || pathLower.endsWith(".css") || pathLower.endsWith(".js") || pathLower.endsWith(".ts");
+    if (!filePath.startsWith(".") && isText) {
       const file = this.app.vault.getAbstractFileByPath(filePath);
       if (file instanceof import_obsidian.TFile) {
         const text2 = await this.app.vault.read(file);
-        return new TextEncoder().encode(text2).buffer;
+        const normalizedText = text2.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        return new TextEncoder().encode(normalizedText).buffer;
       }
       throw new Error(`File not found: ${filePath}`);
     }

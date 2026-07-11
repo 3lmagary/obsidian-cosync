@@ -534,16 +534,27 @@ class CoSyncPlugin extends Plugin {
   }
 
   private async readLocalBinary(filePath: string): Promise<ArrayBuffer> {
-    // .excalidraw.md files are plain text (UTF-8 JSON). Read as text and encode
-    // to a stable UTF-8 buffer so the hash is consistent across platforms.
-    if (!filePath.startsWith('.') && this.isExcalidrawFile(filePath)) {
+    // Plain text files (like .excalidraw.md, .txt, .json, .css, etc.) must be read as text,
+    // normalized to LF line endings, and encoded to a stable UTF-8 buffer so the hash
+    // is consistent across different operating systems.
+    const pathLower = filePath.toLowerCase();
+    const isText = this.isExcalidrawFile(filePath) ||
+                   pathLower.endsWith('.txt') ||
+                   pathLower.endsWith('.json') ||
+                   pathLower.endsWith('.css') ||
+                   pathLower.endsWith('.js') ||
+                   pathLower.endsWith('.ts');
+
+    if (!filePath.startsWith('.') && isText) {
       const file = this.app.vault.getAbstractFileByPath(filePath);
       if (file instanceof TFile) {
         const text = await this.app.vault.read(file);
-        return new TextEncoder().encode(text).buffer;
+        const normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        return new TextEncoder().encode(normalizedText).buffer;
       }
       throw new Error(`File not found: ${filePath}`);
     }
+
     if (filePath.startsWith('.')) {
       return await this.app.vault.adapter.readBinary(filePath);
     } else {
