@@ -1559,16 +1559,11 @@ class CoSyncPlugin extends Plugin {
       const localSyncable = localFiles.filter(f => {
         const pathNormalized = f.path.normalize('NFC');
         if (pathNormalized === 'cosync-sync-log.md') return false;
-        const fileName = pathNormalized.split('/').pop()?.toLowerCase() || '';
-        if (fileName.startsWith('untitled')) return false;
         const pathLower = f.path.toLowerCase();
         if (pathLower.endsWith('.excalidraw.md')) return false;
         return SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
       });
       const localBinary = localFiles.filter(f => {
-        const pathNormalized = f.path.normalize('NFC');
-        const fileName = pathNormalized.split('/').pop()?.toLowerCase() || '';
-        if (fileName.startsWith('untitled')) return false;
         const pathLower = f.path.toLowerCase();
         if (pathLower.endsWith('.excalidraw.md')) return true;
         return !SYNCABLE_EXTENSIONS.has(f.extension.toLowerCase());
@@ -1971,10 +1966,6 @@ class CoSyncPlugin extends Plugin {
       for (const doc of serverDocs) {
         const docTitleNormalized = doc.title.normalize('NFC');
         const docTitleLower = docTitleNormalized.toLowerCase();
-        const docFileName = docTitleLower.split('/').pop() || '';
-        if (docFileName.startsWith('untitled')) {
-          continue;
-        }
         if (docTitleLower === 'cosync-sync-log' || docTitleLower === 'cosync-sync-log.md') {
           continue;
         }
@@ -2762,9 +2753,10 @@ function stripCosyncId(content: string): string {
 }
 
 function getContentHash(str: string): string {
+  const cleanStr = stripCosyncId(str);
   let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
-  for (let i = 0, ch; i < str.length; i++) {
-    ch = str.charCodeAt(i);
+  for (let i = 0, ch; i < cleanStr.length; i++) {
+    ch = cleanStr.charCodeAt(i);
     h1 = Math.imul(h1 ^ ch, 2654435761);
     h2 = Math.imul(h2 ^ ch, 1597334677);
   }
