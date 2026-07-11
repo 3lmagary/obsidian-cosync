@@ -545,25 +545,47 @@ class CoSyncPlugin extends Plugin {
                    pathLower.endsWith('.js') ||
                    pathLower.endsWith('.ts');
 
-    if (!filePath.startsWith('.') && isText) {
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (file instanceof TFile) {
-        const text = await this.app.vault.read(file);
-        const normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-        return new TextEncoder().encode(normalizedText).buffer;
-      }
+    const exists = await this.app.vault.adapter.exists(filePath);
+    if (!exists) {
       throw new Error(`File not found: ${filePath}`);
     }
 
-    if (filePath.startsWith('.')) {
-      return await this.app.vault.adapter.readBinary(filePath);
-    } else {
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (file instanceof TFile) {
-        return await this.app.vault.readBinary(file);
-      }
-      throw new Error(`File not found: ${filePath}`);
+    if (!filePath.startsWith('.') && isText) {
+      const text = await this.app.vault.adapter.read(filePath);
+      const normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      return new TextEncoder().encode(normalizedText).buffer;
     }
+
+    return await this.app.vault.adapter.readBinary(filePath);
+  }
+
+  private verifyAttachmentHashMatch(filePath: string, localBuffer: ArrayBuffer, serverHash: string): boolean {
+    const localHash = getBinaryHash(localBuffer);
+    if (localHash === serverHash) return true;
+
+    // Check if it is a text file, and if CRLF/LF normalized hashes match
+    const pathLower = filePath.toLowerCase();
+    const isText = this.isExcalidrawFile(filePath) ||
+                   pathLower.endsWith('.txt') ||
+                   pathLower.endsWith('.json') ||
+                   pathLower.endsWith('.css') ||
+                   pathLower.endsWith('.js') ||
+                   pathLower.endsWith('.ts');
+
+    if (isText) {
+      try {
+        const text = new TextDecoder().decode(localBuffer);
+        const lfText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const crlfText = lfText.replace(/\n/g, '\r\n');
+        
+        const lfHash = getBinaryHash(new TextEncoder().encode(lfText).buffer);
+        const crlfHash = getBinaryHash(new TextEncoder().encode(crlfText).buffer);
+        return serverHash === lfHash || serverHash === crlfHash;
+      } catch (e) {
+        // Ignore decode errors
+      }
+    }
+    return false;
   }
 
   private async writeLocalBinary(filePath: string, data: ArrayBuffer): Promise<void> {
@@ -2082,13 +2104,13 @@ class CoSyncPlugin extends Plugin {
           const serverAttach = serverAttachMap.get(normalizedFilePath.toLowerCase());
 
           // Upload only when the server doesn't already have the current local content.
-          // If serverAttach.hash === localHash the server is up-to-date; also update
-          // lastSyncedHash so future runs don't redundantly re-check.
-          if (serverAttach && serverAttach.hash === localHash) {
-            if (lastSyncedHash !== localHash) {
-              this.settings.syncHashes[normalizedFilePath] = localHash; // heal stale cache
+          const serverIsUpToDate = serverAttach && this.verifyAttachmentHashMatch(normalizedFilePath, localBuffer, serverAttach.hash);
+
+          if (serverIsUpToDate) {
+            if (lastSyncedHash !== serverAttach.hash) {
+              this.settings.syncHashes[normalizedFilePath] = serverAttach.hash; // heal stale cache
             }
-          } else if (!serverAttach || serverAttach.hash !== localHash) {
+          } else if (!serverAttach || !serverIsUpToDate) {
             console.log(`CoSync: Uploading background attachment "${normalizedFilePath}" (size=${localBuffer.byteLength} bytes)...`);
             const uploadRes = await fetch(
               `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(normalizedFilePath)}&hash=${localHash}`,
@@ -2134,8 +2156,7 @@ class CoSyncPlugin extends Plugin {
             // Check actual local file content to confirm we don't already have the server version.
             try {
               const localBuffer = await this.readLocalBinary(normalizedAttachPath);
-              const localHash = getBinaryHash(localBuffer);
-              needsDownload = localHash !== attach.hash;
+              needsDownload = !this.verifyAttachmentHashMatch(normalizedAttachPath, localBuffer, attach.hash);
             } catch {
               needsDownload = true; // Can't read local file, re-download
             }

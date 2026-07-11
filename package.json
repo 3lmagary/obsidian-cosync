@@ -1,6 +1,6 @@
 {
   "name": "cosync-obsidian-plugin",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "private": true,
   "description": "Real-time collaborative synchronization plugin for Obsidian using Yjs and WebSockets",
   "main": "main.js",

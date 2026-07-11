@@ -10749,24 +10749,34 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
   async readLocalBinary(filePath) {
     const pathLower = filePath.toLowerCase();
     const isText = this.isExcalidrawFile(filePath) || pathLower.endsWith(".txt") || pathLower.endsWith(".json") || pathLower.endsWith(".css") || pathLower.endsWith(".js") || pathLower.endsWith(".ts");
+    const exists = await this.app.vault.adapter.exists(filePath);
+    if (!exists) {
+      throw new Error(`File not found: ${filePath}`);
+    }
     if (!filePath.startsWith(".") && isText) {
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (file instanceof import_obsidian.TFile) {
-        const text2 = await this.app.vault.read(file);
-        const normalizedText = text2.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        return new TextEncoder().encode(normalizedText).buffer;
-      }
-      throw new Error(`File not found: ${filePath}`);
+      const text2 = await this.app.vault.adapter.read(filePath);
+      const normalizedText = text2.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      return new TextEncoder().encode(normalizedText).buffer;
     }
-    if (filePath.startsWith(".")) {
-      return await this.app.vault.adapter.readBinary(filePath);
-    } else {
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (file instanceof import_obsidian.TFile) {
-        return await this.app.vault.readBinary(file);
+    return await this.app.vault.adapter.readBinary(filePath);
+  }
+  verifyAttachmentHashMatch(filePath, localBuffer, serverHash) {
+    const localHash = getBinaryHash(localBuffer);
+    if (localHash === serverHash) return true;
+    const pathLower = filePath.toLowerCase();
+    const isText = this.isExcalidrawFile(filePath) || pathLower.endsWith(".txt") || pathLower.endsWith(".json") || pathLower.endsWith(".css") || pathLower.endsWith(".js") || pathLower.endsWith(".ts");
+    if (isText) {
+      try {
+        const text2 = new TextDecoder().decode(localBuffer);
+        const lfText = text2.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        const crlfText = lfText.replace(/\n/g, "\r\n");
+        const lfHash = getBinaryHash(new TextEncoder().encode(lfText).buffer);
+        const crlfHash = getBinaryHash(new TextEncoder().encode(crlfText).buffer);
+        return serverHash === lfHash || serverHash === crlfHash;
+      } catch (e) {
       }
-      throw new Error(`File not found: ${filePath}`);
     }
+    return false;
   }
   async writeLocalBinary(filePath, data) {
     const exists = await this.app.vault.adapter.exists(filePath);
@@ -12017,11 +12027,12 @@ ${localContent}
           const localHash = getBinaryHash(localBuffer);
           const lastSyncedHash = this.settings.syncHashes[normalizedFilePath];
           const serverAttach = serverAttachMap.get(normalizedFilePath.toLowerCase());
-          if (serverAttach && serverAttach.hash === localHash) {
-            if (lastSyncedHash !== localHash) {
-              this.settings.syncHashes[normalizedFilePath] = localHash;
+          const serverIsUpToDate = serverAttach && this.verifyAttachmentHashMatch(normalizedFilePath, localBuffer, serverAttach.hash);
+          if (serverIsUpToDate) {
+            if (lastSyncedHash !== serverAttach.hash) {
+              this.settings.syncHashes[normalizedFilePath] = serverAttach.hash;
             }
-          } else if (!serverAttach || serverAttach.hash !== localHash) {
+          } else if (!serverAttach || !serverIsUpToDate) {
             console.log(`CoSync: Uploading background attachment "${normalizedFilePath}" (size=${localBuffer.byteLength} bytes)...`);
             const uploadRes = await fetch(
               `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(normalizedFilePath)}&hash=${localHash}`,
@@ -12058,8 +12069,7 @@ ${localContent}
           if (!needsDownload && attach.hash !== lastSyncedHash) {
             try {
               const localBuffer = await this.readLocalBinary(normalizedAttachPath);
-              const localHash = getBinaryHash(localBuffer);
-              needsDownload = localHash !== attach.hash;
+              needsDownload = !this.verifyAttachmentHashMatch(normalizedAttachPath, localBuffer, attach.hash);
             } catch {
               needsDownload = true;
             }
