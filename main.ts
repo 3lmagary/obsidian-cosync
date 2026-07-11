@@ -2510,21 +2510,7 @@ class CoSyncPlugin extends Plugin {
 
           const initialText = isMarkdown ? stripCosyncId(fileContent) : fileContent;
 
-          // Skip creating file if it is an empty Untitled document, and delete it from the server
-          const fileName = normalizedPath.split('/').pop()?.toLowerCase() || '';
-          if (fileName.startsWith('untitled') && initialText.trim() === '') {
-            console.log(`CoSync: Deleting empty Untitled server doc ${normalizedPath} from server...`);
-            fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`, {
-              method: 'DELETE',
-              headers: { 'Authorization': `Bearer ${this.settings.token}` }
-            }).catch(err => console.error("Failed to delete empty Untitled server doc", err));
 
-            tempWs.disconnect();
-            tempWs.destroy();
-            tempYDoc.destroy();
-            resolve();
-            return;
-          }
 
           this.isApplyingRemoteUpdate = true;
           this.addProgrammedModification(normalizedPath);
