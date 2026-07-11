@@ -556,13 +556,14 @@ class CoSyncPlugin extends Plugin {
   }
 
   private async writeLocalBinary(filePath: string, data: ArrayBuffer): Promise<void> {
+    const exists = await this.app.vault.adapter.exists(filePath);
+
     // .excalidraw.md files must be written as text to avoid binary corruption in Obsidian.
     // This matches the LiveSync approach: isPlainText('.excalidraw.md') → true.
     if (!filePath.startsWith('.') && this.isExcalidrawFile(filePath)) {
       const text = new TextDecoder().decode(data);
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (file instanceof TFile) {
-        await this.app.vault.modify(file, text);
+      if (exists) {
+        await this.app.vault.adapter.write(filePath, text);
       } else {
         // Ensure parent folders exist
         const parts = filePath.split('/');
@@ -570,16 +571,20 @@ class CoSyncPlugin extends Plugin {
           let current = '';
           for (let i = 0; i < parts.length - 1; i++) {
             current = current ? `${current}/${parts[i]}` : parts[i];
-            if (!this.app.vault.getAbstractFileByPath(current)) {
-              await this.app.vault.createFolder(current);
+            if (!(await this.app.vault.adapter.exists(current))) {
+              await this.app.vault.adapter.mkdir(current);
             }
           }
         }
-        await this.app.vault.create(filePath, text);
+        await this.app.vault.adapter.write(filePath, text);
       }
       return;
     }
-    if (filePath.startsWith('.')) {
+
+    // Standard binary files (including hidden ones starting with '.')
+    if (exists) {
+      await this.app.vault.adapter.writeBinary(filePath, data);
+    } else {
       // Ensure parent folders exist
       const parts = filePath.split('/');
       if (parts.length > 1) {
@@ -592,24 +597,6 @@ class CoSyncPlugin extends Plugin {
         }
       }
       await this.app.vault.adapter.writeBinary(filePath, data);
-    } else {
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (file instanceof TFile) {
-        await this.app.vault.modifyBinary(file, data);
-      } else {
-        // Ensure parent folders exist
-        const parts = filePath.split('/');
-        if (parts.length > 1) {
-          let current = '';
-          for (let i = 0; i < parts.length - 1; i++) {
-            current = current ? `${current}/${parts[i]}` : parts[i];
-            if (!this.app.vault.getAbstractFileByPath(current)) {
-              await this.app.vault.createFolder(current);
-            }
-          }
-        }
-        await this.app.vault.createBinary(filePath, data);
-      }
     }
   }
 

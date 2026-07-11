@@ -10766,27 +10766,29 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     }
   }
   async writeLocalBinary(filePath, data) {
+    const exists = await this.app.vault.adapter.exists(filePath);
     if (!filePath.startsWith(".") && this.isExcalidrawFile(filePath)) {
       const text2 = new TextDecoder().decode(data);
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (file instanceof import_obsidian.TFile) {
-        await this.app.vault.modify(file, text2);
+      if (exists) {
+        await this.app.vault.adapter.write(filePath, text2);
       } else {
         const parts = filePath.split("/");
         if (parts.length > 1) {
           let current = "";
           for (let i = 0; i < parts.length - 1; i++) {
             current = current ? `${current}/${parts[i]}` : parts[i];
-            if (!this.app.vault.getAbstractFileByPath(current)) {
-              await this.app.vault.createFolder(current);
+            if (!await this.app.vault.adapter.exists(current)) {
+              await this.app.vault.adapter.mkdir(current);
             }
           }
         }
-        await this.app.vault.create(filePath, text2);
+        await this.app.vault.adapter.write(filePath, text2);
       }
       return;
     }
-    if (filePath.startsWith(".")) {
+    if (exists) {
+      await this.app.vault.adapter.writeBinary(filePath, data);
+    } else {
       const parts = filePath.split("/");
       if (parts.length > 1) {
         let current = "";
@@ -10798,23 +10800,6 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
         }
       }
       await this.app.vault.adapter.writeBinary(filePath, data);
-    } else {
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (file instanceof import_obsidian.TFile) {
-        await this.app.vault.modifyBinary(file, data);
-      } else {
-        const parts = filePath.split("/");
-        if (parts.length > 1) {
-          let current = "";
-          for (let i = 0; i < parts.length - 1; i++) {
-            current = current ? `${current}/${parts[i]}` : parts[i];
-            if (!this.app.vault.getAbstractFileByPath(current)) {
-              await this.app.vault.createFolder(current);
-            }
-          }
-        }
-        await this.app.vault.createBinary(filePath, data);
-      }
     }
   }
   async deleteLocalFile(filePath, localFile) {
