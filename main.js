@@ -12425,7 +12425,11 @@ ${localContent}
           const initialText = isMarkdown ? stripCosyncId(fileContent) : fileContent;
           const fileName = normalizedPath.split("/").pop()?.toLowerCase() || "";
           if (fileName.startsWith("untitled") && initialText.trim() === "") {
-            console.log(`CoSync: Skipping download of empty Untitled server doc ${normalizedPath}`);
+            console.log(`CoSync: Deleting empty Untitled server doc ${normalizedPath} from server...`);
+            fetch(`${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`, {
+              method: "DELETE",
+              headers: { "Authorization": `Bearer ${this.settings.token}` }
+            }).catch((err) => console.error("Failed to delete empty Untitled server doc", err));
             tempWs.disconnect();
             tempWs.destroy();
             tempYDoc.destroy();
