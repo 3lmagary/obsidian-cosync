@@ -1810,6 +1810,20 @@ class CoSyncPlugin extends Plugin {
           continue;
         }
 
+        // Skip empty Untitled notes
+        const fileName = normalizedFilePath.split('/').pop()?.toLowerCase() || '';
+        if (fileName.startsWith('untitled')) {
+          try {
+            const content = await this.app.vault.read(file);
+            const cleanContent = stripCosyncId(content).trim();
+            if (cleanContent === '') {
+              continue;
+            }
+          } catch (e) {
+            // Ignore read errors here, let normal flow handle it if needed
+          }
+        }
+
         const isMarkdown = file.extension.toLowerCase() === 'md';
         const title = isMarkdown ? (normalizedFilePath.endsWith('.md') ? normalizedFilePath.slice(0, -3) : normalizedFilePath) : normalizedFilePath;
 
@@ -2497,6 +2511,18 @@ class CoSyncPlugin extends Plugin {
           }
 
           const initialText = isMarkdown ? stripCosyncId(fileContent) : fileContent;
+
+          // Skip creating file if it is an empty Untitled document
+          const fileName = normalizedPath.split('/').pop()?.toLowerCase() || '';
+          if (fileName.startsWith('untitled') && initialText.trim() === '') {
+            console.log(`CoSync: Skipping download of empty Untitled server doc ${normalizedPath}`);
+            tempWs.disconnect();
+            tempWs.destroy();
+            tempYDoc.destroy();
+            resolve();
+            return;
+          }
+
           this.isApplyingRemoteUpdate = true;
           this.addProgrammedModification(normalizedPath);
           try {

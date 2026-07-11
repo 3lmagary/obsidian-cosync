@@ -11803,6 +11803,17 @@ ${localContent}
         if (!this.app.vault.getAbstractFileByPath(file.path)) {
           continue;
         }
+        const fileName = normalizedFilePath.split("/").pop()?.toLowerCase() || "";
+        if (fileName.startsWith("untitled")) {
+          try {
+            const content = await this.app.vault.read(file);
+            const cleanContent = stripCosyncId(content).trim();
+            if (cleanContent === "") {
+              continue;
+            }
+          } catch (e) {
+          }
+        }
         const isMarkdown = file.extension.toLowerCase() === "md";
         const title = isMarkdown ? normalizedFilePath.endsWith(".md") ? normalizedFilePath.slice(0, -3) : normalizedFilePath : normalizedFilePath;
         let docId = this.settings.fileMappings[normalizedFilePath];
@@ -12412,6 +12423,15 @@ ${localContent}
             }
           }
           const initialText = isMarkdown ? stripCosyncId(fileContent) : fileContent;
+          const fileName = normalizedPath.split("/").pop()?.toLowerCase() || "";
+          if (fileName.startsWith("untitled") && initialText.trim() === "") {
+            console.log(`CoSync: Skipping download of empty Untitled server doc ${normalizedPath}`);
+            tempWs.disconnect();
+            tempWs.destroy();
+            tempYDoc.destroy();
+            resolve();
+            return;
+          }
           this.isApplyingRemoteUpdate = true;
           this.addProgrammedModification(normalizedPath);
           try {
