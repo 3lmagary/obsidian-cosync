@@ -593,6 +593,9 @@ class CoSyncPlugin extends Plugin {
       const text = await this.app.vault.adapter.read(filePath);
       const normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
       const uint8 = new TextEncoder().encode(normalizedText);
+      if (this.isExcalidrawFile(filePath)) {
+        console.log(`CoSync: readLocalBinary excalidraw="${filePath}" size=${uint8.length} bytes`);
+      }
       return uint8.buffer.slice(uint8.byteOffset, uint8.byteOffset + uint8.byteLength);
     }
 
@@ -657,6 +660,7 @@ class CoSyncPlugin extends Plugin {
         }
         await this.app.vault.adapter.write(filePath, text);
       }
+      console.log(`CoSync: writeLocalBinary excalidraw="${filePath}" size=${text.length} chars`);
       return;
     }
 
