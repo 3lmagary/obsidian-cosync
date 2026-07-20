@@ -12078,61 +12078,6 @@ ${localContent}
           }
         }
       }
-      for (const file of localBinary) {
-        const normalizedFilePath = file.path.normalize("NFC");
-        if (filesDeletedDuringSync.has(normalizedFilePath)) {
-          continue;
-        }
-        if (!this.app.vault.getAbstractFileByPath(file.path)) {
-          continue;
-        }
-        try {
-          const cooldownTime = this.downloadedFilesCooldown.get(normalizedFilePath.toLowerCase());
-          if (cooldownTime && Date.now() - cooldownTime < 4e3) {
-            console.log(`CoSync: Skipping upload of recently downloaded file under cooldown: ${normalizedFilePath}`);
-            continue;
-          }
-          const localBuffer = await this.readLocalBinary(normalizedFilePath);
-          const localHash = getBinaryHash(localBuffer);
-          const lastSyncedHash = this.settings.syncHashes[normalizedFilePath];
-          const serverAttach = serverAttachMap.get(normalizedFilePath.toLowerCase());
-          const serverIsUpToDate = serverAttach && this.verifyAttachmentHashMatch(normalizedFilePath, localBuffer, serverAttach.hash);
-          if (serverIsUpToDate) {
-            if (lastSyncedHash !== serverAttach.hash) {
-              this.settings.syncHashes[normalizedFilePath] = serverAttach.hash;
-            }
-          } else if (!serverAttach || !serverIsUpToDate) {
-            console.log(`CoSync: Uploading background attachment "${normalizedFilePath}" (size=${localBuffer.byteLength} bytes)...`);
-            const uploadRes = await fetch(
-              `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(normalizedFilePath)}&hash=${localHash}`,
-              {
-                method: "PUT",
-                headers: {
-                  "Authorization": `Bearer ${this.settings.token}`,
-                  "Content-Type": "application/octet-stream"
-                },
-                body: localBuffer
-              }
-            );
-            if (uploadRes.ok) {
-              this.settings.syncHashes[normalizedFilePath] = localHash;
-              const idx = serverAttachments.findIndex((a) => a.filepath.toLowerCase() === normalizedFilePath.toLowerCase());
-              if (idx !== -1) {
-                serverAttachments[idx] = { ...serverAttachments[idx], hash: localHash };
-              }
-              uploadedCount++;
-              this.logEvent("success", `Uploaded attachment "${normalizedFilePath}"`);
-            } else {
-              this.logEvent("error", `Failed to upload attachment "${normalizedFilePath}": HTTP ${uploadRes.status}`);
-              errors.push(`Failed to upload attachment "${normalizedFilePath}": HTTP ${uploadRes.status}`);
-            }
-          }
-        } catch (err) {
-          const normalizedFilePath2 = file.path.normalize("NFC");
-          this.logEvent("error", `Failed to upload attachment "${normalizedFilePath2}": ${err.message || err}`);
-          errors.push(`Failed to upload attachment "${normalizedFilePath2}": ${err.message || err}`);
-        }
-      }
       for (const attach of serverAttachments) {
         try {
           const normalizedAttachPath = attach.filepath.normalize("NFC");
@@ -12238,6 +12183,57 @@ ${localContent}
         } catch (err) {
           this.logEvent("error", `Failed to download attachment "${attach.filepath}": ${err.message || err}`);
           errors.push(`Failed to download attachment "${attach.filepath}": ${err.message || err}`);
+        }
+      }
+      for (const file of localBinary) {
+        const normalizedFilePath = file.path.normalize("NFC");
+        if (filesDeletedDuringSync.has(normalizedFilePath)) {
+          continue;
+        }
+        if (!this.app.vault.getAbstractFileByPath(file.path)) {
+          continue;
+        }
+        try {
+          const cooldownTime = this.downloadedFilesCooldown.get(normalizedFilePath.toLowerCase());
+          if (cooldownTime && Date.now() - cooldownTime < 1e4) {
+            console.log(`CoSync: Skipping upload of recently downloaded file under cooldown: ${normalizedFilePath}`);
+            continue;
+          }
+          const localBuffer = await this.readLocalBinary(normalizedFilePath);
+          const localHash = getBinaryHash(localBuffer);
+          const lastSyncedHash = this.settings.syncHashes[normalizedFilePath];
+          const serverAttach = serverAttachMap.get(normalizedFilePath.toLowerCase());
+          const serverIsUpToDate = serverAttach && this.verifyAttachmentHashMatch(normalizedFilePath, localBuffer, serverAttach.hash);
+          if (serverIsUpToDate) {
+            if (lastSyncedHash !== serverAttach.hash) {
+              this.settings.syncHashes[normalizedFilePath] = serverAttach.hash;
+            }
+          } else if (!serverAttach || !serverIsUpToDate) {
+            console.log(`CoSync: Uploading background attachment "${normalizedFilePath}" (size=${localBuffer.byteLength} bytes)...`);
+            const uploadRes = await fetch(
+              `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/attachments/upload?filepath=${encodeURIComponent(normalizedFilePath)}&hash=${localHash}`,
+              {
+                method: "PUT",
+                headers: {
+                  "Authorization": `Bearer ${this.settings.token}`,
+                  "Content-Type": "application/octet-stream"
+                },
+                body: localBuffer
+              }
+            );
+            if (uploadRes.ok) {
+              this.settings.syncHashes[normalizedFilePath] = localHash;
+              uploadedCount++;
+              this.logEvent("success", `Uploaded attachment "${normalizedFilePath}"`);
+            } else {
+              this.logEvent("error", `Failed to upload attachment "${normalizedFilePath}": HTTP ${uploadRes.status}`);
+              errors.push(`Failed to upload attachment "${normalizedFilePath}": HTTP ${uploadRes.status}`);
+            }
+          }
+        } catch (err) {
+          const normalizedFilePath2 = file.path.normalize("NFC");
+          this.logEvent("error", `Failed to upload attachment "${normalizedFilePath2}": ${err.message || err}`);
+          errors.push(`Failed to upload attachment "${normalizedFilePath2}": ${err.message || err}`);
         }
       }
       await this.saveData(this.settings);
