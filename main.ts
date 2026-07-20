@@ -644,8 +644,11 @@ class CoSyncPlugin extends Plugin {
     // This matches the LiveSync approach: isPlainText('.excalidraw.md') → true.
     if (!filePath.startsWith('.') && this.isExcalidrawFile(filePath)) {
       const text = new TextDecoder().decode(data);
+      // Normalize line endings to LF before writing, so the next readLocalBinary
+      // produces the same hash (prevents upload-download sync loops).
+      const normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
       if (exists) {
-        await this.app.vault.adapter.write(filePath, text);
+        await this.app.vault.adapter.write(filePath, normalizedText);
       } else {
         // Ensure parent folders exist
         const parts = filePath.split('/');
@@ -658,9 +661,9 @@ class CoSyncPlugin extends Plugin {
             }
           }
         }
-        await this.app.vault.adapter.write(filePath, text);
+        await this.app.vault.adapter.write(filePath, normalizedText);
       }
-      console.log(`CoSync: writeLocalBinary excalidraw="${filePath}" size=${text.length} chars`);
+      console.log(`CoSync: writeLocalBinary excalidraw="${filePath}" size=${normalizedText.length} chars`);
       return;
     }
 

@@ -10827,8 +10827,9 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     const exists = await this.app.vault.adapter.exists(filePath);
     if (!filePath.startsWith(".") && this.isExcalidrawFile(filePath)) {
       const text2 = new TextDecoder().decode(data);
+      const normalizedText = text2.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
       if (exists) {
-        await this.app.vault.adapter.write(filePath, text2);
+        await this.app.vault.adapter.write(filePath, normalizedText);
       } else {
         const parts = filePath.split("/");
         if (parts.length > 1) {
@@ -10840,9 +10841,9 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             }
           }
         }
-        await this.app.vault.adapter.write(filePath, text2);
+        await this.app.vault.adapter.write(filePath, normalizedText);
       }
-      console.log(`CoSync: writeLocalBinary excalidraw="${filePath}" size=${text2.length} chars`);
+      console.log(`CoSync: writeLocalBinary excalidraw="${filePath}" size=${normalizedText.length} chars`);
       return;
     }
     if (exists) {
