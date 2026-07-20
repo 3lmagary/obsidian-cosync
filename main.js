@@ -10388,6 +10388,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     this.globalWsReconnectTimeout = null;
     this.lastWsUrl = "";
     this.lastWsToken = "";
+    this.pendingRenames = /* @__PURE__ */ new Set();
     this.recentLogs = [];
   }
   addProgrammedModification(path) {
@@ -10589,6 +10590,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
             const docId = this.settings.fileMappings[oldPathNormalized];
             this.settings.fileMappings[normalizedPath] = docId;
             delete this.settings.fileMappings[oldPathNormalized];
+            this.pendingRenames.add(normalizedPath);
             changed = true;
             renamesToSync.push({ docId, newPath: normalizedPath });
           } else if (this.settings.syncHashes?.[oldPathNormalized]) {
@@ -11865,27 +11867,30 @@ ${localContent}
           docId = matchedServerDoc.id;
           const expectedPath = (isMarkdown ? matchedServerDoc.title.endsWith(".md") ? matchedServerDoc.title : `${matchedServerDoc.title}.md` : matchedServerDoc.title).normalize("NFC");
           if (expectedPath.toLowerCase() !== normalizedFilePath.toLowerCase()) {
-            const localTitle = isMarkdown ? normalizedFilePath.endsWith(".md") ? normalizedFilePath.slice(0, -3) : normalizedFilePath : normalizedFilePath;
-            try {
-              const serverUpdateRes = await fetch(
-                `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`,
-                {
-                  method: "PUT",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${this.settings.token}`
-                  },
-                  body: JSON.stringify({ title: localTitle })
+            if (this.pendingRenames.has(normalizedFilePath)) {
+              this.pendingRenames.delete(normalizedFilePath);
+              const localTitle = isMarkdown ? normalizedFilePath.endsWith(".md") ? normalizedFilePath.slice(0, -3) : normalizedFilePath : normalizedFilePath;
+              try {
+                const serverUpdateRes = await fetch(
+                  `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`,
+                  {
+                    method: "PUT",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Authorization": `Bearer ${this.settings.token}`
+                    },
+                    body: JSON.stringify({ title: localTitle })
+                  }
+                );
+                if (serverUpdateRes.ok) {
+                  console.log(`CoSync: Synced local rename to server: "${normalizedFilePath}"`);
+                  this.settings.fileMappings[normalizedFilePath] = docId;
+                  continue;
                 }
-              );
-              if (serverUpdateRes.ok) {
-                console.log(`CoSync: Synced local rename to server: "${normalizedFilePath}"`);
-                this.settings.fileMappings[normalizedFilePath] = docId;
-                continue;
+              } catch (_) {
               }
-            } catch (_) {
             }
-            console.log(`CoSync: Document path changed on server from "${normalizedFilePath}" to "${expectedPath}". Renaming locally...`);
+            console.log(`CoSync: Document renames on server from "${normalizedFilePath}" to "${expectedPath}". Renaming locally...`);
             const parts = expectedPath.split("/");
             if (parts.length > 1) {
               let current = "";

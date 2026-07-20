@@ -136,6 +136,7 @@ class CoSyncPlugin extends Plugin {
   private globalWsReconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private lastWsUrl: string = '';
   private lastWsToken: string = '';
+  private pendingRenames: Set<string> = new Set();
 
   public recentLogs: Array<{ timestamp: string; level: 'info' | 'success' | 'warn' | 'error'; message: string }> = [];
 
@@ -347,6 +348,7 @@ class CoSyncPlugin extends Plugin {
             const docId = this.settings.fileMappings[oldPathNormalized];
             this.settings.fileMappings[normalizedPath] = docId;
             delete this.settings.fileMappings[oldPathNormalized];
+            this.pendingRenames.add(normalizedPath);
             changed = true;
             renamesToSync.push({ docId, newPath: normalizedPath });
           } else if (this.settings.syncHashes?.[oldPathNormalized]) {
@@ -1907,30 +1909,34 @@ class CoSyncPlugin extends Plugin {
           // --- DETECT RENAME/MOVE ON SERVER ---
           const expectedPath = (isMarkdown ? (matchedServerDoc.title.endsWith('.md') ? matchedServerDoc.title : `${matchedServerDoc.title}.md`) : matchedServerDoc.title).normalize('NFC');
           if (expectedPath.toLowerCase() !== normalizedFilePath.toLowerCase()) {
-            // Before renaming locally, try to update the server to match our local path.
-            // This prevents rename-back loops when the local rename happened but the
-            // server update was missed (e.g., network hiccup during on('rename')).
-            const localTitle = isMarkdown ? (normalizedFilePath.endsWith('.md') ? normalizedFilePath.slice(0, -3) : normalizedFilePath) : normalizedFilePath;
-            try {
-              const serverUpdateRes = await fetch(
-                `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`,
-                {
-                  method: 'PUT',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${this.settings.token}`
-                  },
-                  body: JSON.stringify({ title: localTitle })
+            // If WE renamed this file locally (pendingRenames has the new path),
+            // the server is stale — try to update server title.
+            if (this.pendingRenames.has(normalizedFilePath)) {
+              this.pendingRenames.delete(normalizedFilePath);
+              const localTitle = isMarkdown ? (normalizedFilePath.endsWith('.md') ? normalizedFilePath.slice(0, -3) : normalizedFilePath) : normalizedFilePath;
+              try {
+                const serverUpdateRes = await fetch(
+                  `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`,
+                  {
+                    method: 'PUT',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${this.settings.token}`
+                    },
+                    body: JSON.stringify({ title: localTitle })
+                  }
+                );
+                if (serverUpdateRes.ok) {
+                  console.log(`CoSync: Synced local rename to server: "${normalizedFilePath}"`);
+                  this.settings.fileMappings[normalizedFilePath] = docId;
+                  continue;
                 }
-              );
-              if (serverUpdateRes.ok) {
-                console.log(`CoSync: Synced local rename to server: "${normalizedFilePath}"`);
-                this.settings.fileMappings[normalizedFilePath] = docId;
-                continue;
-              }
-            } catch (_) {}
-            // If the server update failed, fall through to rename the local file to match the server.
-            console.log(`CoSync: Document path changed on server from "${normalizedFilePath}" to "${expectedPath}". Renaming locally...`);
+              } catch (_) {}
+              // Server update failed, fall through to rename local to match server
+            }
+            // ANOTHER device renamed the document on the server.
+            // Rename our local file to match the server path.
+            console.log(`CoSync: Document renames on server from "${normalizedFilePath}" to "${expectedPath}". Renaming locally...`);
             // Ensure parent directories exist
             const parts = expectedPath.split('/');
             if (parts.length > 1) {
