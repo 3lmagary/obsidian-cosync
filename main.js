@@ -12112,6 +12112,10 @@ ${localContent}
             );
             if (uploadRes.ok) {
               this.settings.syncHashes[normalizedFilePath] = localHash;
+              const idx = serverAttachments.findIndex((a) => a.filepath.toLowerCase() === normalizedFilePath.toLowerCase());
+              if (idx !== -1) {
+                serverAttachments[idx] = { ...serverAttachments[idx], hash: localHash };
+              }
               uploadedCount++;
               this.logEvent("success", `Uploaded attachment "${normalizedFilePath}"`);
             } else {

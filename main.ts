@@ -2198,6 +2198,12 @@ class CoSyncPlugin extends Plugin {
             );
             if (uploadRes.ok) {
               this.settings.syncHashes[normalizedFilePath] = localHash;
+              // Update serverAttachments snapshot so the download loop below
+              // doesn't re-download the same content (sync loop prevention).
+              const idx = serverAttachments.findIndex(a => a.filepath.toLowerCase() === normalizedFilePath.toLowerCase());
+              if (idx !== -1) {
+                serverAttachments[idx] = { ...serverAttachments[idx], hash: localHash };
+              }
               uploadedCount++;
               this.logEvent('success', `Uploaded attachment "${normalizedFilePath}"`);
             } else {
