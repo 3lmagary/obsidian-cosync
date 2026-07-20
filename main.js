@@ -10785,7 +10785,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
   }
   async readLocalBinary(filePath) {
     const pathLower = filePath.toLowerCase();
-    const isText = this.isExcalidrawFile(filePath) || pathLower.endsWith(".txt") || pathLower.endsWith(".json") || pathLower.endsWith(".css") || pathLower.endsWith(".js") || pathLower.endsWith(".ts");
+    const isText = this.isExcalidrawFile(filePath) || pathLower.endsWith(".excalidraw") || pathLower.endsWith(".txt") || pathLower.endsWith(".json") || pathLower.endsWith(".css") || pathLower.endsWith(".js") || pathLower.endsWith(".ts");
     const exists = await this.app.vault.adapter.exists(filePath);
     if (!exists) {
       throw new Error(`File not found: ${filePath}`);
@@ -10802,7 +10802,7 @@ var CoSyncPlugin = class extends import_obsidian.Plugin {
     const localHash = getBinaryHash(localBuffer);
     if (localHash === serverHash) return true;
     const pathLower = filePath.toLowerCase();
-    const isText = this.isExcalidrawFile(filePath) || pathLower.endsWith(".txt") || pathLower.endsWith(".json") || pathLower.endsWith(".css") || pathLower.endsWith(".js") || pathLower.endsWith(".ts");
+    const isText = this.isExcalidrawFile(filePath) || pathLower.endsWith(".excalidraw") || pathLower.endsWith(".txt") || pathLower.endsWith(".json") || pathLower.endsWith(".css") || pathLower.endsWith(".js") || pathLower.endsWith(".ts");
     if (isText) {
       try {
         const text2 = new TextDecoder().decode(localBuffer);

@@ -572,11 +572,12 @@ class CoSyncPlugin extends Plugin {
   }
 
   private async readLocalBinary(filePath: string): Promise<ArrayBuffer> {
-    // Plain text files (like .excalidraw.md, .txt, .json, .css, etc.) must be read as text,
+    // Plain text files (like .excalidraw.md, .excalidraw, .txt, .json, .css, etc.) must be read as text,
     // normalized to LF line endings, and encoded to a stable UTF-8 buffer so the hash
     // is consistent across different operating systems.
     const pathLower = filePath.toLowerCase();
     const isText = this.isExcalidrawFile(filePath) ||
+                   pathLower.endsWith('.excalidraw') ||
                    pathLower.endsWith('.txt') ||
                    pathLower.endsWith('.json') ||
                    pathLower.endsWith('.css') ||
@@ -605,6 +606,7 @@ class CoSyncPlugin extends Plugin {
     // Check if it is a text file, and if CRLF/LF normalized hashes match
     const pathLower = filePath.toLowerCase();
     const isText = this.isExcalidrawFile(filePath) ||
+                   pathLower.endsWith('.excalidraw') ||
                    pathLower.endsWith('.txt') ||
                    pathLower.endsWith('.json') ||
                    pathLower.endsWith('.css') ||
@@ -635,7 +637,7 @@ class CoSyncPlugin extends Plugin {
   private async writeLocalBinary(filePath: string, data: ArrayBuffer): Promise<void> {
     const exists = await this.app.vault.adapter.exists(filePath);
 
-    // .excalidraw.md files must be written as text to avoid binary corruption in Obsidian.
+    // .excalidraw.md and .excalidraw files must be written as text to avoid binary corruption in Obsidian.
     // This matches the LiveSync approach: isPlainText('.excalidraw.md') → true.
     if (!filePath.startsWith('.') && this.isExcalidrawFile(filePath)) {
       const text = new TextDecoder().decode(data);
