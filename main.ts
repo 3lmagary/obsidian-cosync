@@ -284,9 +284,8 @@ class CoSyncPlugin extends Plugin {
           return;
         }
         if (this.isApplyingRemoteUpdate) return;
-        if (this.isSyncing) return;
         if (this.instantSyncTimeout) clearTimeout(this.instantSyncTimeout);
-        this.instantSyncTimeout = setTimeout(() => this.syncVault(), 1500);
+        this.instantSyncTimeout = setTimeout(() => this.syncVault(), 3000);
       })
     );
 
@@ -412,8 +411,7 @@ class CoSyncPlugin extends Plugin {
           ).then(() => {
             triggerSync();
           }).catch(err => {
-            console.error('CoSync: Error updating server titles for renamed items:', err);
-            triggerSync();
+            console.error('CoSync: Error updating server titles for renamed items. Local mapping preserved, will retry on next sync.', err);
           });
         } else {
           triggerSync();
@@ -1909,6 +1907,29 @@ class CoSyncPlugin extends Plugin {
           // --- DETECT RENAME/MOVE ON SERVER ---
           const expectedPath = (isMarkdown ? (matchedServerDoc.title.endsWith('.md') ? matchedServerDoc.title : `${matchedServerDoc.title}.md`) : matchedServerDoc.title).normalize('NFC');
           if (expectedPath.toLowerCase() !== normalizedFilePath.toLowerCase()) {
+            // Before renaming locally, try to update the server to match our local path.
+            // This prevents rename-back loops when the local rename happened but the
+            // server update was missed (e.g., network hiccup during on('rename')).
+            const localTitle = isMarkdown ? (normalizedFilePath.endsWith('.md') ? normalizedFilePath.slice(0, -3) : normalizedFilePath) : normalizedFilePath;
+            try {
+              const serverUpdateRes = await fetch(
+                `${this.settings.serverUrl}/api/workspaces/${this.settings.workspaceId}/documents/${docId}`,
+                {
+                  method: 'PUT',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.settings.token}`
+                  },
+                  body: JSON.stringify({ title: localTitle })
+                }
+              );
+              if (serverUpdateRes.ok) {
+                console.log(`CoSync: Synced local rename to server: "${normalizedFilePath}"`);
+                this.settings.fileMappings[normalizedFilePath] = docId;
+                continue;
+              }
+            } catch (_) {}
+            // If the server update failed, fall through to rename the local file to match the server.
             console.log(`CoSync: Document path changed on server from "${normalizedFilePath}" to "${expectedPath}". Renaming locally...`);
             // Ensure parent directories exist
             const parts = expectedPath.split('/');
